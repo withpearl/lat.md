@@ -22,6 +22,7 @@ Shared patterns for writing and organizing tests in this project.
 - [[refs-e2e]] — End-to-end tests for the refs command
 - [[search]] — Semantic search provider detection and RAG replay tests
 - [[check-index]] — Validating directory index files
+- [[check-all]] — Whole-vault check runs share one read and parse across phases
 - [[expand]] — Expand command ref expansion and context block formatting
 - [[ref-resolution]] — Wiki link and code ref resolution across vault subdirectories
 - [[mcp]] — MCP server tool listing and tool call responses

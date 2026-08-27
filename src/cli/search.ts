@@ -21,6 +21,7 @@ import { searchSections } from '../search/search.js';
 import {
   loadAllSections,
   flattenSections,
+  type Section,
   type SectionMatch,
 } from '../lattice.js';
 import { formatResultList, formatNavHints } from '../format.js';
@@ -43,9 +44,14 @@ async function withDb<T>(
   fn: (
     db: Awaited<ReturnType<typeof openDb>>,
     embedder: Embedder,
+    sections: Section[],
   ) => Promise<T>,
+  preloaded?: Section[],
 ): Promise<T> {
   const db = openDb(latDir);
+  // Parsed once here and handed to both the index pass and hit resolution —
+  // each used to parse the vault on its own.
+  const sections = preloaded ?? (await loadAllSections(latDir));
 
   try {
     await ensureMeta(db);
@@ -89,7 +95,13 @@ async function withDb<T>(
 
     progress?.beforeIndex?.(isEmpty);
     try {
-      const stats = await indexSections(latDir, db, embedder);
+      const stats = await indexSections(
+        latDir,
+        db,
+        embedder,
+        undefined,
+        sections,
+      );
       // Pin the backend only after a successful index, so a failed build never
       // leaves the repo wrongly pinned to an empty index.
       if (!stored) await setStoredModel(db, modelKey(embedder));
@@ -101,7 +113,7 @@ async function withDb<T>(
       throw err;
     }
 
-    return await fn(db, embedder);
+    return await fn(db, embedder, sections);
   } finally {
     await closeDb(db);
   }
@@ -111,10 +123,11 @@ async function withDb<T>(
 async function resolveMatches(
   latDir: string,
   results: { id: string; score: number }[],
+  sections?: Section[],
 ): Promise<SectionMatch[]> {
   if (results.length === 0) return [];
 
-  const allSections = await loadAllSections(latDir);
+  const allSections = sections ?? (await loadAllSections(latDir));
   const flat = flattenSections(allSections);
   const byId = new Map(flat.map((s) => [s.id, s]));
 
@@ -135,13 +148,16 @@ async function resolveMatches(
  * fresh repo isn't blocked by a full local embed pass. Building the index is
  * `lat search` / `lat reindex`. With nothing indexed yet, returns no matches
  * without even loading the embedder to embed the query.
+ *
+ * `opts.sections` is an already-parsed vault; a caller that parses it anyway
+ * (the prompt hook) passes it in so the search doesn't parse again.
  */
 export async function runSearch(
   latDir: string,
   query: string,
   limit: number,
   progress?: IndexProgress,
-  opts?: { buildIndex?: boolean },
+  opts?: { buildIndex?: boolean; sections?: Section[] },
 ): Promise<SearchResult> {
   if (opts?.buildIndex === false) {
     const db = openDb(latDir);
@@ -154,16 +170,27 @@ export async function runSearch(
       const embedder = await embedderForIndex(stored, latDir);
       await ensureSectionsSchema(db, embedder.dimensions);
       const results = await searchSections(db, query, embedder, limit);
-      return { query, matches: await resolveMatches(latDir, results) };
+      return {
+        query,
+        matches: await resolveMatches(latDir, results, opts.sections),
+      };
     } finally {
       await closeDb(db);
     }
   }
 
-  return withDb(latDir, progress, async (db, embedder) => {
-    const results = await searchSections(db, query, embedder, limit);
-    return { query, matches: await resolveMatches(latDir, results) };
-  });
+  return withDb(
+    latDir,
+    progress,
+    async (db, embedder, sections) => {
+      const results = await searchSections(db, query, embedder, limit);
+      return {
+        query,
+        matches: await resolveMatches(latDir, results, sections),
+      };
+    },
+    opts?.sections,
+  );
 }
 
 /**

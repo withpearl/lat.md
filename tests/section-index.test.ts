@@ -7,12 +7,18 @@ import { getSection, buildSectionIndex } from '../src/cli/section.js';
 // `getSection`, so the tests can count them without changing behaviour.
 const spies = vi.hoisted(() => ({
   loadAllSections: vi.fn(),
+  extractRefs: vi.fn(),
   scanCodeRefs: vi.fn(),
 }));
 vi.mock('../src/lattice.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/lattice.js')>();
   spies.loadAllSections.mockImplementation(actual.loadAllSections);
-  return { ...actual, loadAllSections: spies.loadAllSections };
+  spies.extractRefs.mockImplementation(actual.extractRefs);
+  return {
+    ...actual,
+    loadAllSections: spies.loadAllSections,
+    extractRefs: spies.extractRefs,
+  };
 });
 vi.mock('../src/code-refs.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/code-refs.js')>();
@@ -53,6 +59,9 @@ describe('getSection with a shared index', () => {
     spies.scanCodeRefs.mockClear();
 
     const index = await buildSectionIndex(c);
+    expect(index.refsByFile.size).toBeGreaterThan(0);
+    spies.extractRefs.mockClear();
+
     const ids = index.flat.slice(0, 3).map((s) => s.id);
     expect(ids).toHaveLength(3);
     for (const id of ids) {
@@ -60,6 +69,9 @@ describe('getSection with a shared index', () => {
     }
     expect(spies.loadAllSections).toHaveBeenCalledTimes(1);
     expect(spies.scanCodeRefs).toHaveBeenCalledTimes(1);
+    // Lookups reuse the index's per-file extraction rather than re-walking
+    // the section's whole file for its outgoing links.
+    expect(spies.extractRefs).toHaveBeenCalledTimes(0);
 
     // Without a shared index every lookup pays for its own parse and scan.
     spies.loadAllSections.mockClear();

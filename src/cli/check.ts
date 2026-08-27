@@ -20,6 +20,38 @@ import { toPosix, walkEntries } from '../walk.js';
 import type { CmdContext, CmdResult, Styler } from '../context.js';
 import { INIT_VERSION, readInitVersion } from '../init-version.js';
 
+/**
+ * One read and one parse of every vault file, shared by the check phases.
+ * A whole-vault run (`lat check`, the Stop hook) has five phases, and each
+ * used to list, read and parse the vault on its own — on a large corpus that
+ * repetition was most of the runtime. A phase run alone loads its own.
+ */
+export type Vault = {
+  files: string[];
+  contents: Map<string, string>;
+  sectionsByFile: Map<string, Section[]>;
+  /** Same shape and order as `loadAllSections` returns. */
+  allSections: Section[];
+};
+
+export async function loadVault(
+  latticeDir: string,
+  projectRoot = dirname(latticeDir),
+): Promise<Vault> {
+  const files = await listLatticeFiles(latticeDir);
+  const contents = new Map<string, string>();
+  const sectionsByFile = new Map<string, Section[]>();
+  const allSections: Section[] = [];
+  for (const file of files) {
+    const content = await readFile(file, 'utf-8');
+    const sections = parseSections(file, content, projectRoot);
+    contents.set(file, content);
+    sectionsByFile.set(file, sections);
+    allSections.push(...sections);
+  }
+  return { files, contents, sectionsByFile, allSections };
+}
+
 export type CheckError = {
   file: string;
   line: number;
@@ -141,10 +173,11 @@ export async function sourceRefError(
 export async function checkMd(
   latticeDir: string,
   projectRoot = dirname(latticeDir),
+  vault?: Vault,
 ): Promise<CheckResult> {
   clearSymbolCache();
-  const files = await listLatticeFiles(latticeDir);
-  const allSections = await loadAllSections(latticeDir, projectRoot);
+  const { files, contents, allSections } =
+    vault ?? (await loadVault(latticeDir, projectRoot));
   const flat = flattenSections(allSections);
   const sectionIds = new Set(flat.map((s) => s.id.toLowerCase()));
   const fileIndex = buildFileIndex(allSections);
@@ -153,7 +186,7 @@ export async function checkMd(
   const errors: CheckError[] = [];
 
   for (const file of files) {
-    const content = await readFile(file, 'utf-8');
+    const content = contents.get(file)!;
     const refs = extractRefs(file, content, projectRoot);
     const relPath = relative(process.cwd(), file);
 
@@ -240,8 +273,11 @@ function localLinkTarget(url: string): LocalLinkTarget | null {
   };
 }
 
-export async function checkLinks(latticeDir: string): Promise<CheckError[]> {
-  const files = await listLatticeFiles(latticeDir);
+export async function checkLinks(
+  latticeDir: string,
+  vault?: Vault,
+): Promise<CheckError[]> {
+  const { files, contents } = vault ?? (await loadVault(latticeDir));
   const errors: CheckError[] = [];
   const headingCache = new Map<string, Set<string>>();
 
@@ -249,7 +285,7 @@ export async function checkLinks(latticeDir: string): Promise<CheckError[]> {
     const cached = headingCache.get(file);
     if (cached) return cached;
 
-    const content = await readFile(file, 'utf-8');
+    const content = contents.get(file) ?? (await readFile(file, 'utf-8'));
     const headings = new Set(
       flattenSections(parseSections(file, content)).map(
         (section) => section.githubSlug!,
@@ -260,7 +296,7 @@ export async function checkLinks(latticeDir: string): Promise<CheckError[]> {
   };
 
   for (const file of files) {
-    const content = await readFile(file, 'utf-8');
+    const content = contents.get(file)!;
     const relPath = toPosix(relative(process.cwd(), file));
 
     for (const link of extractLinks(content)) {
@@ -329,8 +365,10 @@ export async function checkLinks(latticeDir: string): Promise<CheckError[]> {
 export async function checkCodeRefs(
   latticeDir: string,
   projectRoot = dirname(latticeDir),
+  vault?: Vault,
 ): Promise<CheckResult> {
-  const allSections = await loadAllSections(latticeDir, projectRoot);
+  const { files, contents, sectionsByFile, allSections } =
+    vault ?? (await loadVault(latticeDir, projectRoot));
   const flat = flattenSections(allSections);
   const sectionIds = new Set(flat.map((s) => s.id.toLowerCase()));
   const fileIndex = buildFileIndex(allSections);
@@ -366,13 +404,12 @@ export async function checkCodeRefs(
     }
   }
 
-  const files = await listLatticeFiles(latticeDir);
   for (const file of files) {
-    const content = await readFile(file, 'utf-8');
+    const content = contents.get(file)!;
     const fm = parseFrontmatter(content);
     if (!fm.requireCodeMention) continue;
 
-    const sections = parseSections(file, content, projectRoot);
+    const sections = sectionsByFile.get(file)!;
     const fileSections = flattenSections(sections);
     const leafSections = fileSections.filter((s) => s.children.length === 0);
     const relPath = relative(process.cwd(), file);
@@ -546,13 +583,14 @@ function bodyTextLength(body: string): number {
 export async function checkSections(
   latticeDir: string,
   projectRoot = dirname(latticeDir),
+  vault?: Vault,
 ): Promise<CheckError[]> {
-  const files = await listLatticeFiles(latticeDir);
+  const { files, sectionsByFile } =
+    vault ?? (await loadVault(latticeDir, projectRoot));
   const errors: CheckError[] = [];
 
   for (const file of files) {
-    const content = await readFile(file, 'utf-8');
-    const sections = parseSections(file, content, projectRoot);
+    const sections = sectionsByFile.get(file)!;
     const flat = flattenSections(sections);
     const relPath = relative(process.cwd(), file);
 
@@ -634,11 +672,12 @@ function formatErrorCount(count: number, s: Styler): string {
 
 export async function checkAllCommand(ctx: CmdContext): Promise<CmdResult> {
   const startTime = Date.now();
-  const md = await checkMd(ctx.latDir, ctx.projectRoot);
-  const linkErrors = await checkLinks(ctx.latDir);
-  const code = await checkCodeRefs(ctx.latDir, ctx.projectRoot);
+  const vault = await loadVault(ctx.latDir, ctx.projectRoot);
+  const md = await checkMd(ctx.latDir, ctx.projectRoot, vault);
+  const linkErrors = await checkLinks(ctx.latDir, vault);
+  const code = await checkCodeRefs(ctx.latDir, ctx.projectRoot, vault);
   const indexErrors = await checkIndex(ctx.latDir);
-  const sectionErrors = await checkSections(ctx.latDir, ctx.projectRoot);
+  const sectionErrors = await checkSections(ctx.latDir, ctx.projectRoot, vault);
   const elapsed = Date.now() - startTime;
 
   const allErrors = [...md.errors, ...linkErrors, ...code.errors];
