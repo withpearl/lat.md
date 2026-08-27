@@ -58,4 +58,4 @@ Verifies that `formatSectionOutput` correctly renders the "Referenced by" block 
 
 ## Shared index parses and scans once
 
-With one `SectionIndex`, three lookups call `loadAllSections` and `scanCodeRefs` once in total; without it each lookup parses the vault and scans the repo again. This is what keeps the prompt hook inside its timeout on large corpora.
+With one `SectionIndex`, three lookups call `loadAllSections` and `scanCodeRefs` once in total and `extractRefs` not at all; without it each lookup parses the vault and scans the repo again. This keeps the prompt hook inside its timeout.

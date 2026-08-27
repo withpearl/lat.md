@@ -14,17 +14,26 @@ import {
 import { indexSections } from '../src/search/index.js';
 import { searchSections } from '../src/search/search.js';
 import { runSearch } from '../src/cli/search.js';
+import { loadAllSections } from '../src/lattice.js';
 import { startReplayServer, hasReplayData } from './rag-replay-server.js';
 import type { Client } from '@libsql/client';
 import type { Server } from 'node:http';
 
 // Passthrough spy on `readFile` so the indexing test below can count how many
 // times each lat.md file is read. Every other test sees the real implementation.
-const { readFileSpy } = vi.hoisted(() => ({ readFileSpy: vi.fn() }));
+const { readFileSpy, loadAllSectionsSpy } = vi.hoisted(() => ({
+  readFileSpy: vi.fn(),
+  loadAllSectionsSpy: vi.fn(),
+}));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   readFileSpy.mockImplementation(actual.readFile);
   return { ...actual, readFile: readFileSpy };
+});
+vi.mock('../src/lattice.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lattice.js')>();
+  loadAllSectionsSpy.mockImplementation(actual.loadAllSections);
+  return { ...actual, loadAllSections: loadAllSectionsSpy };
 });
 
 // --- Unit tests: provider detection (now lives in @lat.md/embed) ---
@@ -296,5 +305,56 @@ describe('search (rag, file reads)', () => {
     for (const [file, reads] of readsPerFile) {
       expect(reads, `${file} read ${reads} times`).toBeLessThanOrEqual(2);
     }
+  });
+});
+
+// --- A search parses the vault once ---
+//
+// The index pass and hit resolution each parsed the whole vault; on a large
+// corpus that is a second per search spent re-reading what the first parse
+// already produced. The prompt hook parses once more on top for its section
+// index, so it can hand its parse in and skip the search's own.
+
+describe('search (rag, parse count)', () => {
+  let latDir: string;
+
+  beforeAll(() => {
+    latDir = copyFixture();
+  });
+
+  afterAll(() => {
+    if (latDir) rmDirBestEffort(join(latDir, '..'));
+  });
+
+  // @lat: [[search#RAG Tests#Search parses the vault once]]
+  it('parses the vault once per search, or not at all when handed a parse', async () => {
+    loadAllSectionsSpy.mockClear();
+    const first = await runSearch(latDir, 'user login and security', 5);
+    expect(first.matches.length).toBeGreaterThan(0);
+    expect(loadAllSectionsSpy).toHaveBeenCalledTimes(1); // builds the index
+
+    loadAllSectionsSpy.mockClear();
+    const warm = await runSearch(latDir, 'user login and security', 5);
+    expect(warm.matches.map((m) => m.section.id)).toEqual(
+      first.matches.map((m) => m.section.id),
+    );
+    expect(loadAllSectionsSpy).toHaveBeenCalledTimes(1); // index up to date
+
+    const sections = await loadAllSections(latDir);
+    loadAllSectionsSpy.mockClear();
+    const handed = await runSearch(
+      latDir,
+      'user login and security',
+      5,
+      undefined,
+      {
+        buildIndex: false,
+        sections,
+      },
+    );
+    expect(handed.matches.map((m) => m.section.id)).toEqual(
+      first.matches.map((m) => m.section.id),
+    );
+    expect(loadAllSectionsSpy).toHaveBeenCalledTimes(0);
   });
 });

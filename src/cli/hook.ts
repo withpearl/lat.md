@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
 import { dirname, extname } from 'node:path';
-import { findLatticeDir } from '../lattice.js';
+import { findLatticeDir, loadAllSections } from '../lattice.js';
 import { plainStyler, type CmdContext } from '../context.js';
 import { expandPrompt } from './expand.js';
 import { runSearch } from './search.js';
@@ -65,6 +65,8 @@ async function searchAndExpand(
   ctx: CmdContext,
   userPrompt: string,
 ): Promise<string | null> {
+  // The vault is parsed once and shared by the search and the section index.
+  const sections = await loadAllSections(ctx.latDir);
   let result;
   try {
     // Read-only: search an existing index but never build/update it here. A fresh
@@ -72,6 +74,7 @@ async function searchAndExpand(
     // `lat search` / `lat reindex` are for. Returns no matches until then.
     result = await runSearch(ctx.latDir, userPrompt, 5, undefined, {
       buildIndex: false,
+      sections,
     });
   } catch {
     // No usable backend (e.g. reindex required, key rejected) — skip semantic
@@ -88,7 +91,7 @@ async function searchAndExpand(
   // One index for every match: parsing the vault, walking each file's links
   // and scanning the repo for `@lat:` refs are seconds apiece on a large
   // corpus, and doing them per match put this hook past its timeout.
-  const index = await buildSectionIndex(ctx);
+  const index = await buildSectionIndex(ctx, sections);
   for (const match of result.matches) {
     const sectionResult = await getSection(ctx, match.section.id, index);
     if (sectionResult.kind === 'found') {

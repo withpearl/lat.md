@@ -50,9 +50,10 @@ export async function indexSections(
   db: Client,
   embedder: Embedder,
   onProgress?: (done: number, total: number) => void,
+  sections?: Section[],
 ): Promise<IndexStats> {
   const projectRoot = dirname(latDir);
-  const allSections = await loadAllSections(latDir);
+  const allSections = sections ?? (await loadAllSections(latDir));
   const flat = flattenSections(allSections);
 
   // Build current state: id -> { section, content, hash }

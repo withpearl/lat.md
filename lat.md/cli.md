@@ -287,7 +287,7 @@ Reads the hook input from stdin (Claude JSON with `user_prompt` or Codex JSON wi
 1. A directive to ALWAYS run `lat search` on the user's intent before starting work — even for seemingly straightforward tasks — because search may reveal critical design details, protocols, or constraints. Includes a hard gate: do not read files, write code, or run commands until search is done.
 2. A reminder that `lat.md/` must stay in sync with meaningful codebase state: update relevant current-state sections for behavior, architecture, tests, or planned-work changes, but do not use `lat.md/` as a journal/changelog or grow it for insignificant details.
 3. If the prompt contains `[[refs]]`, resolves them inline using [[src/cli/expand.ts#expandPrompt]]
-4. Runs [[src/cli/search.ts#runSearch]] on the user prompt in **read-only mode** (`buildIndex: false`) — it searches an existing index but never builds or updates one, so a user's first prompt in a fresh repo isn't blocked by a full local embed pass (building the index is `lat search` / [[cli#reindex]], and until then this returns no matches). Then one [[src/cli/section.ts#buildSectionIndex]] for all results and [[src/cli/section.ts#getSection]] + [[src/cli/section.ts#formatSectionOutput]] on each — the agent gets full section content with outgoing/incoming refs before it starts work. Gracefully degrades when nothing is indexed yet or the backend can't serve the index.
+4. Runs [[src/cli/search.ts#runSearch]] on the user prompt in **read-only mode** (`buildIndex: false`) — it searches an existing index but never builds or updates one, so a user's first prompt in a fresh repo isn't blocked by a full local embed pass (building the index is `lat search` / [[cli#reindex]], and until then this returns no matches). Then, with the vault parsed once and shared with the search, one [[src/cli/section.ts#buildSectionIndex]] for all results and [[src/cli/section.ts#getSection]] + [[src/cli/section.ts#formatSectionOutput]] on each — the agent gets full section content with outgoing/incoming refs before it starts work. Gracefully degrades when nothing is indexed yet or the backend can't serve the index.
 
 ### Stop
 
@@ -333,7 +333,7 @@ Usage: `lat search [query] [--limit=5]`
 
 Query is optional — `lat search` with no query just builds the index on first use. `lat search` only reads; rebuilding is [[cli#reindex]]. Results include a navigation hint footer suggesting `lat locate`, `lat refs`, and `lat search` for further exploration — this makes the tools self-documenting so agents discover them organically.
 
-Core search logic in [[src/cli/search.ts#runSearch]] (returns matched sections), used by both the CLI command and [[cli#mcp]] `lat_search` tool. Indexing/storage internals are in `src/search/`; all embedding generation lives in the `@lat.md/embed` package (see [[cli#search#Embeddings]]).
+Core search logic in [[src/cli/search.ts#runSearch]] (returns matched sections), used by both the CLI command and [[cli#mcp]] `lat_search` tool. The vault is parsed once per search and shared by the index pass and hit resolution; a caller that already holds a parse (the prompt hook) passes it as `opts.sections`. Indexing/storage internals are in `src/search/`; all embedding generation lives in the `@lat.md/embed` package (see [[cli#search#Embeddings]]).
 
 ### Backend selection
 

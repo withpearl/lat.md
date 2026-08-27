@@ -62,6 +62,8 @@ export type SectionIndex = {
   incoming: Map<string, Section[]>;
   /** Lowercase section id → `@lat:` code refs resolving to it, in scan order. */
   codeRefs: Map<string, { file: string; line: number }[]>;
+  /** Absolute file path → every wiki ref extracted from that file. */
+  refsByFile: Map<string, ReturnType<typeof extractRefs>>;
 };
 
 export async function buildSectionIndex(
@@ -84,10 +86,13 @@ export async function buildSectionIndex(
   // Incoming wiki links: one entry per (target, referencing section); a
   // section linking to itself is not an incoming reference.
   const incoming = new Map<string, Section[]>();
+  const refsByFile = new Map<string, ReturnType<typeof extractRefs>>();
   const seen = new Set<string>();
   for (const file of await listLatticeFiles(ctx.latDir)) {
     const fc = await readFile(file, 'utf-8');
-    for (const ref of extractRefs(file, fc, ctx.projectRoot)) {
+    const fileRefs = extractRefs(file, fc, ctx.projectRoot);
+    refsByFile.set(file, fileRefs);
+    for (const ref of fileRefs) {
       const target = resolve(ref.target);
       const from = ref.fromSection.toLowerCase();
       if (from === target || seen.has(`${target}\n${from}`)) continue;
@@ -119,6 +124,7 @@ export async function buildSectionIndex(
     slugIndex,
     incoming,
     codeRefs,
+    refsByFile,
   };
 }
 
@@ -164,8 +170,12 @@ export async function getSection(
   const idx = index ?? (await buildSectionIndex(ctx, allSections));
   const { flat, sectionIds, fileIndex, slugIndex } = idx;
 
-  // Find outgoing wiki link targets within this section's content
-  const sectionRefs = extractRefs(absPath, fileContent, ctx.projectRoot);
+  // Find outgoing wiki link targets within this section's content. The index
+  // already extracted this file's refs; re-extracting costs a full markdown
+  // pass over the file (0.8 s for a 3.5 MB file) per lookup.
+  const sectionRefs =
+    idx.refsByFile.get(absPath) ??
+    extractRefs(absPath, fileContent, ctx.projectRoot);
   const sectionId = section.id.toLowerCase();
 
   const outgoingRefs: { target: string; resolved: Section }[] = [];

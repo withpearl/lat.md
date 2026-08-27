@@ -60,6 +60,10 @@ however many sections it holds: the parser reads it once and section slicing reu
 Before this was pinned, a 3.5 MB file holding 12k sections was re-read once per section — 12k
 times on every search.
 
+### Search parses the vault once
+
+`runSearch` calls `loadAllSections` once whether it is building the index or finding it up to date, and not at all in read-only mode when the caller hands in an already-parsed vault. Results are identical across all three.
+
 ### Rebuilds a legacy cache with no recorded model
 
 Seed a 1536-dim `sections` table with rows but no `meta.embedding_model`, then run a local-backed
