@@ -473,18 +473,37 @@ export function resolveRef(
 }
 
 /**
- * Find root (h1) headings for a file by scanning sectionIds for entries
- * that have exactly the pattern `file#heading` (no further # segments).
+ * Root (h1) headings per file, derived from the section ids that have exactly
+ * the pattern `file#heading` (no further # segments). Built once per id set
+ * and memoized on the set itself: `resolveRef` needs this for every short-form
+ * ref, and rescanning all ids per ref made resolving 11k `@lat:` refs against
+ * 13k sections cost ~6 s (0.5 ms each). The size check guards a set that grew
+ * after the first lookup.
  */
-function findRootHeadings(file: string, sectionIds: Set<string>): string[] {
-  const prefix = file.toLowerCase() + '#';
-  const headings: string[] = [];
+const rootHeadingsCache = new WeakMap<
+  Set<string>,
+  { size: number; byFile: Map<string, string[]> }
+>();
+
+function rootHeadingsByFile(sectionIds: Set<string>): Map<string, string[]> {
+  const cached = rootHeadingsCache.get(sectionIds);
+  if (cached && cached.size === sectionIds.size) return cached.byFile;
+  const byFile = new Map<string, string[]>();
   for (const id of sectionIds) {
-    if (id.startsWith(prefix) && !id.includes('#', prefix.length)) {
-      headings.push(id.slice(prefix.length));
-    }
+    const hashIdx = id.indexOf('#');
+    if (hashIdx === -1 || id.includes('#', hashIdx + 1)) continue;
+    const file = id.slice(0, hashIdx);
+    const heading = id.slice(hashIdx + 1);
+    const headings = byFile.get(file);
+    if (headings) headings.push(heading);
+    else byFile.set(file, [heading]);
   }
-  return headings;
+  rootHeadingsCache.set(sectionIds, { size: sectionIds.size, byFile });
+  return byFile;
+}
+
+function findRootHeadings(file: string, sectionIds: Set<string>): string[] {
+  return rootHeadingsByFile(sectionIds).get(file.toLowerCase()) ?? [];
 }
 
 const MAX_DISTANCE_RATIO = 0.4;
