@@ -65,6 +65,10 @@ Validation command group. Without a subcommand it runs every check against the
 discovered `lat.md/`; an explicit `-- <directory>` suffix validates any
 Markdown directory instead.
 
+A whole-vault run — `lat check` with no subcommand, and the Stop hook — reads and
+parses the vault once ([[src/cli/check.ts#loadVault]]) and shares it across the md,
+links, code-refs and sections phases; a phase run alone loads its own.
+
 Usage: `lat check [md|links|code-refs|index|sections] [-- <directory>]`
 
 The separator is required. It keeps directory names distinct from subcommands:

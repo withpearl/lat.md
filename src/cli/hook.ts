@@ -9,7 +9,13 @@ import {
   buildSectionIndex,
   formatSectionOutput,
 } from './section.js';
-import { checkMd, checkCodeRefs, checkIndex, checkSections } from './check.js';
+import {
+  checkMd,
+  checkCodeRefs,
+  checkIndex,
+  checkSections,
+  loadVault,
+} from './check.js';
 import { SOURCE_EXTENSIONS } from '../source-parser.js';
 
 function outputPromptSubmit(context: string): void {
@@ -218,10 +224,11 @@ type StopStatus = {
 };
 
 async function getStopStatus(latDir: string): Promise<StopStatus> {
-  const md = await checkMd(latDir);
-  const code = await checkCodeRefs(latDir);
+  const vault = await loadVault(latDir);
+  const md = await checkMd(latDir, undefined, vault);
+  const code = await checkCodeRefs(latDir, undefined, vault);
   const indexErrors = await checkIndex(latDir);
-  const sectionErrors = await checkSections(latDir);
+  const sectionErrors = await checkSections(latDir, undefined, vault);
   const totalErrors =
     md.errors.length +
     code.errors.length +
