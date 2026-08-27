@@ -50,3 +50,12 @@ Verifies that `formatSectionOutput` correctly renders the "Referenced by" block 
 ## formatSectionOutput includes all parts
 
 `formatSectionOutput` produces styled output containing section id, location, raw content, "This section references" with outgoing refs, "Referenced by" with incoming refs, and "Referenced by code" with `@lat:` back-references.
+
+
+## Shared index returns identical results
+
+`getSection` given a prebuilt `SectionIndex` returns a result deep-equal to a standalone lookup, for a full-id fixture and a short-id fixture — the shared path changes cost, never output.
+
+## Shared index parses and scans once
+
+With one `SectionIndex`, three lookups call `loadAllSections` and `scanCodeRefs` once in total; without it each lookup parses the vault and scans the repo again. This is what keeps the prompt hook inside its timeout on large corpora.

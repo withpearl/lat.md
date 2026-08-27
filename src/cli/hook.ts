@@ -4,7 +4,11 @@ import { findLatticeDir } from '../lattice.js';
 import { plainStyler, type CmdContext } from '../context.js';
 import { expandPrompt } from './expand.js';
 import { runSearch } from './search.js';
-import { getSection, formatSectionOutput } from './section.js';
+import {
+  getSection,
+  buildSectionIndex,
+  formatSectionOutput,
+} from './section.js';
 import { checkMd, checkCodeRefs, checkIndex, checkSections } from './check.js';
 import { SOURCE_EXTENSIONS } from '../source-parser.js';
 
@@ -81,8 +85,12 @@ async function searchAndExpand(
     '',
   ];
 
+  // One index for every match: parsing the vault, walking each file's links
+  // and scanning the repo for `@lat:` refs are seconds apiece on a large
+  // corpus, and doing them per match put this hook past its timeout.
+  const index = await buildSectionIndex(ctx);
   for (const match of result.matches) {
-    const sectionResult = await getSection(ctx, match.section.id);
+    const sectionResult = await getSection(ctx, match.section.id, index);
     if (sectionResult.kind === 'found') {
       parts.push(formatSectionOutput(ctx, sectionResult));
       parts.push('');

@@ -37,7 +37,7 @@ Output:
 
 Usage: `lat section <query>`
 
-Core logic in [[src/cli/section.ts#getSection]] (returns structured result), used by both the CLI command and [[cli#mcp]] `lat_section` tool.
+Core logic in [[src/cli/section.ts#getSection]] (returns structured result), used by both the CLI command and [[cli#mcp]] `lat_section` tool. Incoming links and `@lat:` back-references come from a [[src/cli/section.ts#buildSectionIndex]] built per call — or built once and shared when a caller looks up several sections.
 
 ## refs
 
@@ -287,7 +287,7 @@ Reads the hook input from stdin (Claude JSON with `user_prompt` or Codex JSON wi
 1. A directive to ALWAYS run `lat search` on the user's intent before starting work — even for seemingly straightforward tasks — because search may reveal critical design details, protocols, or constraints. Includes a hard gate: do not read files, write code, or run commands until search is done.
 2. A reminder that `lat.md/` must stay in sync with meaningful codebase state: update relevant current-state sections for behavior, architecture, tests, or planned-work changes, but do not use `lat.md/` as a journal/changelog or grow it for insignificant details.
 3. If the prompt contains `[[refs]]`, resolves them inline using [[src/cli/expand.ts#expandPrompt]]
-4. Runs [[src/cli/search.ts#runSearch]] on the user prompt in **read-only mode** (`buildIndex: false`) — it searches an existing index but never builds or updates one, so a user's first prompt in a fresh repo isn't blocked by a full local embed pass (building the index is `lat search` / [[cli#reindex]], and until then this returns no matches). Then [[src/cli/section.ts#getSection]] + [[src/cli/section.ts#formatSectionOutput]] on each result — the agent gets full section content with outgoing/incoming refs before it starts work. Gracefully degrades when nothing is indexed yet or the backend can't serve the index.
+4. Runs [[src/cli/search.ts#runSearch]] on the user prompt in **read-only mode** (`buildIndex: false`) — it searches an existing index but never builds or updates one, so a user's first prompt in a fresh repo isn't blocked by a full local embed pass (building the index is `lat search` / [[cli#reindex]], and until then this returns no matches). Then one [[src/cli/section.ts#buildSectionIndex]] for all results and [[src/cli/section.ts#getSection]] + [[src/cli/section.ts#formatSectionOutput]] on each — the agent gets full section content with outgoing/incoming refs before it starts work. Gracefully degrades when nothing is indexed yet or the backend can't serve the index.
 
 ### Stop
 
