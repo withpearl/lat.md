@@ -46,16 +46,95 @@ export type SectionResult =
   | { kind: 'no-match'; suggestions: SectionMatch[] };
 
 /**
+ * Everything `getSection` needs about the vault and the code referencing it,
+ * built once. `lat section` builds it per call; a caller looking up several
+ * sections (the prompt hook) builds it once and passes it in, because the
+ * parse, the wiki-link pass over every file, and the repo-wide `@lat:` scan
+ * each take seconds on a large corpus.
+ */
+export type SectionIndex = {
+  allSections: Section[];
+  flat: Section[];
+  sectionIds: Set<string>;
+  fileIndex: Map<string, string[]>;
+  slugIndex: ReturnType<typeof buildSectionSlugIndex>;
+  /** Lowercase section id → sections whose wiki links resolve to it, in vault order. */
+  incoming: Map<string, Section[]>;
+  /** Lowercase section id → `@lat:` code refs resolving to it, in scan order. */
+  codeRefs: Map<string, { file: string; line: number }[]>;
+};
+
+export async function buildSectionIndex(
+  ctx: CmdContext,
+  allSections?: Section[],
+): Promise<SectionIndex> {
+  allSections ??= await loadAllSections(ctx.latDir);
+  const flat = flattenSections(allSections);
+  const sectionIds = new Set(flat.map((s) => s.id.toLowerCase()));
+  const fileIndex = buildFileIndex(allSections);
+  const slugIndex = buildSectionSlugIndex(allSections);
+  const byId = new Map<string, Section>();
+  for (const s of flat) {
+    const id = s.id.toLowerCase();
+    if (!byId.has(id)) byId.set(id, s);
+  }
+  const resolve = (target: string): string =>
+    resolveRef(target, sectionIds, fileIndex, slugIndex).resolved.toLowerCase();
+
+  // Incoming wiki links: one entry per (target, referencing section); a
+  // section linking to itself is not an incoming reference.
+  const incoming = new Map<string, Section[]>();
+  const seen = new Set<string>();
+  for (const file of await listLatticeFiles(ctx.latDir)) {
+    const fc = await readFile(file, 'utf-8');
+    for (const ref of extractRefs(file, fc, ctx.projectRoot)) {
+      const target = resolve(ref.target);
+      const from = ref.fromSection.toLowerCase();
+      if (from === target || seen.has(`${target}\n${from}`)) continue;
+      seen.add(`${target}\n${from}`);
+      const fromSection = byId.get(from);
+      if (!fromSection) continue;
+      const list = incoming.get(target);
+      if (list) list.push(fromSection);
+      else incoming.set(target, [fromSection]);
+    }
+  }
+
+  // Code back-references: `@lat:` comments, scanned and resolved once.
+  const codeRefs = new Map<string, { file: string; line: number }[]>();
+  const { refs } = await scanCodeRefs(ctx.projectRoot);
+  for (const ref of refs) {
+    const target = resolve(ref.target);
+    const entry = { file: ref.file, line: ref.line };
+    const list = codeRefs.get(target);
+    if (list) list.push(entry);
+    else codeRefs.set(target, [entry]);
+  }
+
+  return {
+    allSections,
+    flat,
+    sectionIds,
+    fileIndex,
+    slugIndex,
+    incoming,
+    codeRefs,
+  };
+}
+
+/**
  * Look up a section by id, return its content, outgoing wiki link targets,
- * and incoming references from other sections.
+ * and incoming references from other sections. Pass a prebuilt `index` when
+ * looking up several sections in one run.
  */
 export async function getSection(
   ctx: CmdContext,
   query: string,
+  index?: SectionIndex,
 ): Promise<SectionResult> {
   query = query.replace(/^\[\[|\]\]$/g, '');
 
-  const allSections = await loadAllSections(ctx.latDir);
+  const allSections = index?.allSections ?? (await loadAllSections(ctx.latDir));
   const matches = findSections(allSections, query);
 
   if (matches.length === 0) {
@@ -82,11 +161,10 @@ export async function getSection(
   const end = fullEndLine(section);
   const content = lines.slice(section.startLine - 1, end).join('\n');
 
+  const idx = index ?? (await buildSectionIndex(ctx, allSections));
+  const { flat, sectionIds, fileIndex, slugIndex } = idx;
+
   // Find outgoing wiki link targets within this section's content
-  const flat = flattenSections(allSections);
-  const sectionIds = new Set(flat.map((s) => s.id.toLowerCase()));
-  const fileIndex = buildFileIndex(allSections);
-  const slugIndex = buildSectionSlugIndex(allSections);
   const sectionRefs = extractRefs(absPath, fileContent, ctx.projectRoot);
   const sectionId = section.id.toLowerCase();
 
@@ -165,62 +243,26 @@ export async function getSection(
     }
   }
 
-  // Find incoming references: other sections that link to this one
-  const incomingRefs: SectionMatch[] = [];
-  const files = await listLatticeFiles(ctx.latDir);
-  const incomingSections = new Set<string>();
+  // Incoming references: other sections that link to this one
+  const incomingRefs: SectionMatch[] = (idx.incoming.get(sectionId) ?? []).map(
+    (from) => ({ section: from, reason: 'wiki link' }),
+  );
 
-  for (const file of files) {
-    const fc = await readFile(file, 'utf-8');
-    const fileRefs = extractRefs(file, fc, ctx.projectRoot);
-    for (const ref of fileRefs) {
-      const { resolved } = resolveRef(
-        ref.target,
-        sectionIds,
-        fileIndex,
-        slugIndex,
-      );
-      if (
-        resolved.toLowerCase() === sectionId &&
-        ref.fromSection.toLowerCase() !== sectionId
-      ) {
-        if (!incomingSections.has(ref.fromSection.toLowerCase())) {
-          incomingSections.add(ref.fromSection.toLowerCase());
-          const fromSection = flat.find(
-            (s) => s.id.toLowerCase() === ref.fromSection.toLowerCase(),
-          );
-          if (fromSection) {
-            incomingRefs.push({ section: fromSection, reason: 'wiki link' });
-          }
-        }
-      }
-    }
-  }
-
-  // Find code back-references: @lat: comments pointing to this section
+  // Code back-references: @lat: comments pointing to this section
   const codeRefs: CodeBackRef[] = [];
-  const { refs: scannedRefs } = await scanCodeRefs(ctx.projectRoot);
-  for (const ref of scannedRefs) {
-    const { resolved: codeResolved } = resolveRef(
-      ref.target,
-      sectionIds,
-      fileIndex,
-      slugIndex,
-    );
-    if (codeResolved.toLowerCase() === sectionId) {
-      const absFile = join(ctx.projectRoot, ref.file);
-      let snippet = '';
-      try {
-        const src = await readFile(absFile, 'utf-8');
-        const srcLines = src.split('\n');
-        const start = Math.max(0, ref.line - 1 - 2);
-        const end = Math.min(srcLines.length, ref.line - 1 + 3);
-        snippet = srcLines.slice(start, end).join('\n');
-      } catch {
-        // file unreadable — skip snippet
-      }
-      codeRefs.push({ file: ref.file, line: ref.line, snippet });
+  for (const ref of idx.codeRefs.get(sectionId) ?? []) {
+    const absFile = join(ctx.projectRoot, ref.file);
+    let snippet = '';
+    try {
+      const src = await readFile(absFile, 'utf-8');
+      const srcLines = src.split('\n');
+      const start = Math.max(0, ref.line - 1 - 2);
+      const end = Math.min(srcLines.length, ref.line - 1 + 3);
+      snippet = srcLines.slice(start, end).join('\n');
+    } catch {
+      // file unreadable — skip snippet
     }
+    codeRefs.push({ file: ref.file, line: ref.line, snippet });
   }
 
   return {

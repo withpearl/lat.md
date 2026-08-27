@@ -90,3 +90,42 @@ describe('bare-name link resolution in a subdirectory (issue #69)', () => {
     }
   });
 });
+
+// `resolveRef` resolves short-form refs (`file#Leaf`, no root heading) by
+// inserting the file's root headings. Those used to be found by scanning every
+// section id on every call — quadratic in corpus size, and the dominant cost of
+// `lat section` / `lat check` / the prompt hook on a 13k-section corpus.
+describe('short-form ref resolution against a large section set', () => {
+  const makeIds = (n: number) =>
+    new Set(
+      Array.from({ length: n }, (_, i) => `lat.md/tests#tests#case ${i}`),
+    ).add('lat.md/tests#tests');
+  const fileIndex = new Map([['tests', ['lat.md/tests']]]);
+
+  // @lat: [[ref-resolution#Short ref resolution scales past ten thousand refs]]
+  it('resolves ten thousand short refs without rescanning the id set', () => {
+    const n = 10_000;
+    const sectionIds = makeIds(n);
+    const started = performance.now();
+    for (let i = 0; i < n; i++) {
+      const { resolved } = resolveRef(`tests#case ${i}`, sectionIds, fileIndex);
+      expect(resolved.toLowerCase()).toBe(`lat.md/tests#tests#case ${i}`);
+    }
+    // Indexed: a few ms. Rescanning per ref was ~0.5 ms × n on the corpus
+    // that motivated this, so a generous bound still fails the old code.
+    expect(performance.now() - started).toBeLessThan(2_000);
+  }, 30_000);
+
+  // @lat: [[ref-resolution#Root heading index tracks a growing section set]]
+  it('picks up a root heading added after the first lookup', () => {
+    const sectionIds = new Set(['lat.md/a#a', 'lat.md/a#a#child']);
+    const index = new Map([['a', ['lat.md/a']]]);
+    expect(resolveRef('a#child', sectionIds, index).resolved).toBe(
+      'lat.md/a#a#child',
+    );
+    sectionIds.add('lat.md/a#b').add('lat.md/a#b#other');
+    expect(resolveRef('a#other', sectionIds, index).resolved).toBe(
+      'lat.md/a#b#other',
+    );
+  });
+});

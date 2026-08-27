@@ -106,3 +106,11 @@ A wiki link `[[guide#Install#Setup]]` with headings in the wrong order is flagge
 ## Nonexistent leaf in nested ref is error
 
 A wiki link `[[guide#Setup#Missing]]` where the leaf heading does not exist is flagged as a broken link by `check md`.
+
+## Short ref resolution scales past ten thousand refs
+
+Ten thousand short-form refs (`tests#case N`, root heading omitted) resolve against a ten-thousand-section set in well under two seconds, proving root headings come from a per-file index rather than a scan of every id per ref.
+
+## Root heading index tracks a growing section set
+
+After a first lookup, adding a new root heading and its child to the same section set makes the child resolvable through that new root — the memoized per-file root-heading index is rebuilt when the set grows.
