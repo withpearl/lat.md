@@ -70,5 +70,9 @@ agent may be running under a tool timeout.
 
 ### Reindex compresses neighbour vectors
 
-`lat reindex` on that uncompressed index rebuilds it with 1-bit neighbour vectors: each node
-block shrinks by more than 10x, and the same query returns the same sections in the same order.
+`lat reindex` on that uncompressed index rebuilds it with 1-bit neighbour vectors and a 1600-candidate
+search beam: node blocks shrink by more than 10x and the same query returns the same sections.
+
+The beam is asserted from libSQL's stored index settings, not the DDL text. Without it, float1bit lost
+true top-5 hits on 8% of real queries against a 16k-section corpus — a loss this 9-section fixture,
+where every search is exact, cannot show.
