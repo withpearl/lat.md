@@ -74,6 +74,7 @@ export async function getSection(
   const isConfident =
     top.reason === 'exact match' ||
     top.reason.startsWith('file stem expanded') ||
+    top.reason.startsWith('found in folder') ||
     top.reason === 'section name match';
 
   if (!isConfident) {

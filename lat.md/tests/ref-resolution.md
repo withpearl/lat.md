@@ -131,6 +131,10 @@ A ref that names the directory by its full path (`[[lat.md/specs#Invoices#Void I
 
 `findSections` resolves a folder ref to the section in the directory's file, while a heading of the index file itself still wins.
 
+## Folder index ref section shows the section
+
+`lat section` on a folder ref shows the section from the file that holds it, and lists both files as suggestions when the heading is in two of them.
+
 ## Folder index ref refs finds code references
 
 `lat refs` for a section reached through a folder ref finds the `@lat:` code comments and wiki links that use the folder form.

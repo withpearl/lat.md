@@ -95,7 +95,8 @@ export async function expandPrompt(
   for (const ref of resolved.values()) {
     const isExact =
       ref.best.reason === 'exact match' ||
-      ref.best.reason.startsWith('file stem expanded');
+      ref.best.reason.startsWith('file stem expanded') ||
+      ref.best.reason.startsWith('found in folder');
     const all = isExact ? [ref.best] : [ref.best, ...ref.alternatives];
 
     if (isExact) {

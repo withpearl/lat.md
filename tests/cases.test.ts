@@ -1195,6 +1195,23 @@ describe('folder-refs', () => {
     if (md.kind !== 'found') return;
     expect(md.mdRefs.map((r) => r.section.id)).toContain('lat.md/links#Links');
   });
+
+  // @lat: [[ref-resolution#Folder index ref section shows the section]]
+  it('getSection shows a folder ref and only suggests an ambiguous one', async () => {
+    const ctx = testCtx('folder-refs');
+    const bill = await getSection(ctx, 'specs#Bills#Replace Bill');
+    expect(bill.kind).toBe('found');
+    if (bill.kind !== 'found') return;
+    expect(bill.section.id).toBe('lat.md/specs/a#Specs#Bills#Replace Bill');
+
+    const shared = await getSection(ctx, 'specs#Shared Area');
+    expect(shared.kind).toBe('no-match');
+    if (shared.kind !== 'no-match') return;
+    expect(shared.suggestions.map((m) => m.section.id).sort()).toEqual([
+      'lat.md/specs/a#Specs#Shared Area',
+      'lat.md/specs/b#Specs#Shared Area',
+    ]);
+  });
 });
 
 // --- full ref ---

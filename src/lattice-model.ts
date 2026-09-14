@@ -581,12 +581,13 @@ export function findSections(
         fileIndex,
         slugIndex,
       );
+      const found = ambiguous ? 'ambiguous in folder' : 'found in folder';
       for (const id of ambiguous ?? [resolved]) {
         const s = sectionFor(id);
         if (s && !exact.includes(s))
           stemMatches.push({
             section: s,
-            reason: `found in folder: ${filePart} → ${s.file}`,
+            reason: `${found}: ${filePart} → ${s.file}`,
           });
       }
     }
