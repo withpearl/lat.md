@@ -59,6 +59,8 @@ References can use just the file name (without directory path) when the name is 
 
 For example, `[[search#Provider Detection]]` resolves to `lat.md/tests/search#Search Tests#Provider Detection` if there's only one `search.md` in the vault. If multiple files share the same name, the full path is required — `lat check` reports ambiguous refs as errors.
 
+A ref to a directory's index file also reaches the other files in that directory. When `[[specs#Bills#Replace Bill]]` resolves to `specs/specs.md` and the index has no such heading, [[src/lattice-model.ts#resolveRef]] looks for it in the directory's other files, each with its root heading implicit: one match resolves, several are ambiguous. A large file can therefore be split into a folder, with an index named after it, without changing any ref. The vault root's index does not take part.
+
 The root (h1) heading can be omitted in references: `[[backend#CORS]]` resolves to `lat.md/backend#Backend#CORS` because the h1 heading is implicit from the file. Both `resolveRef()` and `findSections()` handle this by trying to insert root headings when a direct match fails.
 
 [[src/lattice-model.ts#buildSectionSlugIndex]] maps GitHub-slugged heading paths back to canonical literal-heading ids. Strict and lenient resolution accept either form while continuing to return the original section ids used by existing CLI output.

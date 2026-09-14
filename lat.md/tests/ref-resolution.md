@@ -111,6 +111,34 @@ A wiki link `[[guide#Setup#Missing]]` where the leaf heading does not exist is f
 
 Ten thousand short-form refs (`tests#case N`, root heading omitted) resolve against a ten-thousand-section set in well under two seconds, proving root headings come from a per-file index rather than a scan of every id per ref.
 
+## Folder index ref resolves in the folder's files
+
+A ref whose file part names a directory's index file (`[[specs#Bills#Replace Bill]]` with `specs/specs.md`) and whose heading is not in the index resolves in the other files of that directory, so `check md` accepts it. Headings in the index itself still resolve there first.
+
+## Folder index ref ambiguous across files
+
+When more than one file in the directory holds the heading, the ref is ambiguous, and `check md` lists every matching section rather than picking one.
+
+## Folder index ref counts as a code mention
+
+`@lat:` comments that resolve through a directory's index count toward `require-code-mention` for leaf sections in that directory's files.
+
+## Folder index ref findSections resolves
+
+`findSections` resolves a folder ref to the section in the directory's file, while a heading of the index file itself still wins.
+
+## Folder index ref refs finds code references
+
+`lat refs` for a section reached through a folder ref finds the `@lat:` code comments and wiki links that use the folder form.
+
+## Folder index ref resolution scales across shard files
+
+Fourteen thousand folder refs spread over sixty-four files in one directory resolve in well under two seconds, because each directory's heading paths are indexed once per section set rather than per ref.
+
+## Vault root index does not search the vault
+
+The vault root's index file (`lat.md/lat.md`) does not count as a directory index for this fallback, so a missing heading under its stem is not looked up in every top-level file.
+
 ## Root heading index tracks a growing section set
 
 After a first lookup, adding a new root heading and its child to the same section set makes the child resolvable through that new root — the memoized per-file root-heading index is rebuilt when the set grows.

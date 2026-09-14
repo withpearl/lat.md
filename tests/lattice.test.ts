@@ -116,6 +116,67 @@ describe('short-form ref resolution against a large section set', () => {
     expect(performance.now() - started).toBeLessThan(2_000);
   }, 30_000);
 
+  // @lat: [[ref-resolution#Folder index ref resolution scales across shard files]]
+  it('resolves fourteen thousand folder refs across sixty-four shard files', () => {
+    const shards = 64;
+    const n = 14_000;
+    const sectionIds = new Set<string>(['lat.md/tests/tests#tests']);
+    const files = ['lat.md/tests/tests'];
+    for (let s = 0; s < shards; s++) {
+      files.push(`lat.md/tests/${s}`);
+      sectionIds.add(`lat.md/tests/${s}#tests`);
+    }
+    for (let i = 0; i < n; i++) {
+      const shard = i % shards;
+      sectionIds.add(`lat.md/tests/${shard}#tests#area ${i}`);
+      sectionIds.add(`lat.md/tests/${shard}#tests#area ${i}#spec`);
+    }
+    const fileIndex = buildFileIndex(
+      files.map((file) => ({
+        id: `${file}#Tests`,
+        file,
+        filePath: `${file}.md`,
+        heading: 'Tests',
+        depth: 1,
+        startLine: 1,
+        endLine: 1,
+        children: [],
+        firstParagraph: '',
+      })),
+    );
+    const started = performance.now();
+    for (let i = 0; i < n; i++) {
+      const { resolved, ambiguous } = resolveRef(
+        `tests#area ${i}#spec`,
+        sectionIds,
+        fileIndex,
+      );
+      expect(ambiguous).toBeNull();
+      expect(resolved.toLowerCase()).toBe(
+        `lat.md/tests/${i % shards}#tests#area ${i}#spec`,
+      );
+    }
+    // The folder's heading index is built once for the id set: a few hundred
+    // ms. Rebuilding it per ref took over two minutes here.
+    expect(performance.now() - started).toBeLessThan(2_000);
+  }, 30_000);
+
+  // @lat: [[ref-resolution#Vault root index does not search the vault]]
+  it('does not resolve a missing heading of the vault root index in other files', () => {
+    const sectionIds = new Set([
+      'lat.md/lat#lat',
+      'lat.md/guide#guide',
+      'lat.md/guide#guide#install',
+    ]);
+    const index = new Map([
+      ['lat', ['lat.md/lat']],
+      ['guide', ['lat.md/guide']],
+    ]);
+    expect(resolveRef('lat#install', sectionIds, index).resolved).toBe(
+      'lat#install',
+    );
+  });
+
   // @lat: [[ref-resolution#Root heading index tracks a growing section set]]
   it('picks up a root heading added after the first lookup', () => {
     const sectionIds = new Set(['lat.md/a#a', 'lat.md/a#a#child']);

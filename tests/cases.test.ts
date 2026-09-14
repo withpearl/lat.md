@@ -1113,6 +1113,70 @@ describe('short-ref', () => {
   });
 });
 
+// --- folder refs ---
+
+describe('folder-refs', () => {
+  const lat = latDir('folder-refs');
+
+  // @lat: [[ref-resolution#Folder index ref resolves in the folder's files]]
+  it('check md resolves index-file refs in the folder and flags only the ambiguous one', async () => {
+    expect(await checkIndex(lat)).toEqual([]);
+    const { errors } = await checkMd(lat);
+    expect(errors.map((e) => e.target)).toEqual(['specs#Shared Area']);
+  });
+
+  // @lat: [[ref-resolution#Folder index ref ambiguous across files]]
+  it('reports a heading found in two files of the folder as ambiguous', async () => {
+    const { errors } = await checkMd(lat);
+    const message = errors[0].message.toLowerCase();
+    expect(message).toContain("ambiguous link '[[specs#shared area]]'");
+    expect(message).toContain("'[[lat.md/specs/a#specs#shared area]]'");
+    expect(message).toContain("'[[lat.md/specs/b#specs#shared area]]'");
+  });
+
+  // @lat: [[ref-resolution#Folder index ref counts as a code mention]]
+  it('counts code refs through the folder toward require-code-mention', async () => {
+    const { errors } = await checkCodeRefs(lat);
+    expect(errors).toEqual([]);
+  });
+
+  // @lat: [[ref-resolution#Folder index ref findSections resolves]]
+  it('findSections resolves folder refs and keeps the index file first', async () => {
+    const sections = await loadAllSections(lat);
+    const bill = findSections(sections, 'specs#Bills#Replace Bill');
+    expect(bill.map((m) => m.section.id)).toEqual([
+      'lat.md/specs/a#Specs#Bills#Replace Bill',
+    ]);
+    expect(bill[0].reason).toContain('found in folder');
+    expect(
+      findSections(sections, 'specs#Conventions').map((m) => m.section.id),
+    ).toEqual(['lat.md/specs/specs#Specs#Conventions']);
+  });
+
+  // @lat: [[ref-resolution#Folder index ref refs finds code references]]
+  it('findRefs follows folder refs from markdown and code', async () => {
+    const code = await findRefs(
+      testCtx('folder-refs'),
+      'specs#Invoices#Void Invoice',
+      'code',
+    );
+    expect(code.kind).toBe('found');
+    if (code.kind !== 'found') return;
+    expect(code.target.id).toBe('lat.md/specs/b#Specs#Invoices#Void Invoice');
+    expect(code.codeRefs).toHaveLength(1);
+    expect(code.codeRefs[0]).toContain('app.ts');
+
+    const md = await findRefs(
+      testCtx('folder-refs'),
+      'specs#Bills#Replace Bill',
+      'md',
+    );
+    expect(md.kind).toBe('found');
+    if (md.kind !== 'found') return;
+    expect(md.mdRefs.map((r) => r.section.id)).toContain('lat.md/links#Links');
+  });
+});
+
 // --- full ref ---
 
 describe('full-ref', () => {

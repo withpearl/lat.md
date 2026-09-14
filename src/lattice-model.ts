@@ -258,6 +258,25 @@ export function resolveRef(
     if (resolved) {
       return { resolved, ambiguous: null, suggested: null };
     }
+    // A ref to a directory's index file whose heading is not in the index
+    // resolves in the directory's other files, so a file split into a folder
+    // keeps every existing `[[name#Heading]]` working. Exactly one file must
+    // hold the heading; several are ambiguous, as a shared file stem is.
+    const dir = rest ? indexedDirectory(fp) : null;
+    if (dir) {
+      const literal = folderFilesWithPath(dir, rest, sectionIds, fileIndex);
+      // GitHub-slug forms are not in the literal index; try every file only
+      // when a slug index can resolve them and nothing matched literally.
+      const candidates =
+        literal.length || !slugIndex ? literal : filesInFolder(dir, fileIndex);
+      const matches = candidates
+        .map((file) => resolveInFile(file, rest))
+        .filter((match): match is string => match !== null);
+      if (matches.length === 1)
+        return { resolved: matches[0], ambiguous: null, suggested: null };
+      if (matches.length > 1)
+        return { resolved: target, ambiguous: matches, suggested: null };
+    }
   } else if (filePaths.length > 1) {
     // Multiple files share this stem — ambiguous at the filename level
     const all = filePaths.map((c) => c + rest);
@@ -304,6 +323,95 @@ function rootHeadingsByFile(sectionIds: Set<string>): Map<string, string[]> {
 
 function findRootHeadings(file: string, sectionIds: Set<string>): string[] {
   return rootHeadingsByFile(sectionIds).get(file.toLowerCase()) ?? [];
+}
+
+/**
+ * The directory a directory-index file stands for, or null. An index file
+ * shares its directory's name, so `lat.md/tests/tests` stands for
+ * `lat.md/tests`. The vault root's index (`lat.md/lat`) does not match, so a
+ * root-level stem never searches the whole vault.
+ */
+export function indexedDirectory(file: string): string | null {
+  const slash = file.lastIndexOf('/');
+  if (slash === -1) return null;
+  const dir = file.slice(0, slash);
+  return dir.slice(dir.lastIndexOf('/') + 1).toLowerCase() ===
+    file.slice(slash + 1).toLowerCase()
+    ? dir
+    : null;
+}
+
+/** Files directly inside each directory, keyed by lowercase directory path. */
+const folderFilesCache = new WeakMap<
+  Map<string, string[]>,
+  Map<string, string[]>
+>();
+
+function filesInFolder(
+  dir: string,
+  fileIndex: Map<string, string[]>,
+): string[] {
+  let byDir = folderFilesCache.get(fileIndex);
+  if (!byDir) {
+    byDir = new Map();
+    const files = new Set([...fileIndex.values()].flat());
+    for (const file of files) {
+      const slash = file.lastIndexOf('/');
+      if (slash === -1 || indexedDirectory(file)) continue;
+      const key = file.slice(0, slash).toLowerCase();
+      byDir.set(key, [...(byDir.get(key) ?? []), file]);
+    }
+    folderFilesCache.set(fileIndex, byDir);
+  }
+  return byDir.get(dir.toLowerCase()) ?? [];
+}
+
+/**
+ * For one directory, which of its files hold a literal heading path, keyed by
+ * that path with and without the file's root heading (`#tests#bills#x` and
+ * `#bills#x`). Memoized on the id set like root headings, so resolving every
+ * `@lat:` ref of a sharded spec folder costs one pass over the ids per folder.
+ */
+const folderHeadingsCache = new WeakMap<
+  Set<string>,
+  { size: number; byDir: Map<string, Map<string, Set<string>>> }
+>();
+
+function folderFilesWithPath(
+  dir: string,
+  rest: string,
+  sectionIds: Set<string>,
+  fileIndex: Map<string, string[]>,
+): string[] {
+  let cached = folderHeadingsCache.get(sectionIds);
+  if (!cached || cached.size !== sectionIds.size) {
+    cached = { size: sectionIds.size, byDir: new Map() };
+    folderHeadingsCache.set(sectionIds, cached);
+  }
+  const dirKey = dir.toLowerCase();
+  let byPath = cached.byDir.get(dirKey);
+  if (!byPath) {
+    byPath = new Map();
+    const files = new Map(
+      filesInFolder(dir, fileIndex).map((f) => [f.toLowerCase(), f]),
+    );
+    const add = (path: string, file: string) => {
+      const set = byPath!.get(path) ?? new Set<string>();
+      set.add(file);
+      byPath!.set(path, set);
+    };
+    for (const id of sectionIds) {
+      const hashIdx = id.indexOf('#');
+      const file = hashIdx === -1 ? undefined : files.get(id.slice(0, hashIdx));
+      if (!file) continue;
+      const withRoot = id.slice(hashIdx);
+      add(withRoot, file);
+      const second = withRoot.indexOf('#', 1);
+      if (second !== -1) add(withRoot.slice(second), file);
+    }
+    cached.byDir.set(dirKey, byPath);
+  }
+  return [...(byPath.get(rest.toLowerCase()) ?? [])];
 }
 
 const MAX_DISTANCE_RATIO = 0.4;
@@ -430,6 +538,29 @@ export function findSections(
                 : 'exact match',
           });
         }
+      }
+    }
+    // A directory index's stem also reaches headings in that directory's
+    // files, matching resolveRef, so `lat section tests#Area#Spec` works on a
+    // spec file split into a folder.
+    if (
+      stemMatches.length === 0 &&
+      allPaths.length === 1 &&
+      indexedDirectory(allPaths[0])
+    ) {
+      const { resolved, ambiguous } = resolveRef(
+        normalized,
+        new Set(byId.keys()),
+        fileIndex,
+        slugIndex,
+      );
+      for (const id of ambiguous ?? [resolved]) {
+        const s = sectionFor(id);
+        if (s && !exact.includes(s))
+          stemMatches.push({
+            section: s,
+            reason: `found in folder: ${filePart} → ${s.file}`,
+          });
       }
     }
     if (stemMatches.length > 0) return [...exactMatches, ...stemMatches];
