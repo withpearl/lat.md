@@ -218,13 +218,14 @@ describe('search (rag, legacy cache upgrade)', () => {
   });
 });
 
-// --- Vector index layout: compressed neighbour vectors ---
+// --- Vector index layout: compressed neighbour vectors, wide search beam ---
 //
 // DiskANN stores, per node, a copy of every neighbour's vector. At full float32
 // precision those copies made a 7 MB corpus build a 1.3 GB index, so they are
-// stored at one bit per dimension. `CREATE INDEX IF NOT EXISTS` never touches
-// an existing index: a cache built before the change keeps working unchanged,
-// and `lat reindex` is what rebuilds it compressed.
+// stored at one bit per dimension — and search keeps a wider candidate beam,
+// without which the 1-bit index lost real top-5 hits. `CREATE INDEX IF NOT
+// EXISTS` never touches an existing index: a cache built before the change keeps
+// working unchanged, and `lat reindex` is what rebuilds it.
 
 /** The index as every version before neighbour compression created it. */
 async function createUncompressedIndex(db: Client, dimensions: number) {
@@ -235,15 +236,31 @@ async function createUncompressedIndex(db: Client, dimensions: number) {
   );
 }
 
-/** Bytes libSQL stores per graph node of `sections_vec_idx` (one row each). */
-async function vectorIndexBlockBytes(latDir: string): Promise<number> {
+/**
+ * What libSQL actually built for `sections_vec_idx`: the bytes it stores per
+ * graph node, and the search beam it recorded. Index settings are stored as
+ * 9-byte records — a key byte, then a little-endian u64 — where key 0x09 is
+ * `search_l`.
+ */
+async function vectorIndexLayout(
+  latDir: string,
+): Promise<{ blockBytes: number; searchL: number }> {
   const db = openDb(latDir);
   try {
-    const rows = await db.execute(
+    const blocks = await db.execute(
       'SELECT DISTINCT length(data) AS n FROM sections_vec_idx_shadow',
     );
-    expect(rows.rows).toHaveLength(1);
-    return Number(rows.rows[0].n);
+    expect(blocks.rows).toHaveLength(1);
+    const meta = await db.execute(
+      "SELECT metadata FROM libsql_vector_meta_shadow WHERE name = 'sections_vec_idx'",
+    );
+    const settings = Buffer.from(meta.rows[0].metadata as ArrayBuffer);
+    let searchL = NaN;
+    for (let i = 0; i + 9 <= settings.length; i += 9) {
+      if (settings[i] === 0x09)
+        searchL = Number(settings.readBigUInt64LE(i + 1));
+    }
+    return { blockBytes: Number(blocks.rows[0].n), searchL };
   } finally {
     await closeDb(db);
   }
@@ -253,7 +270,7 @@ describe('search (rag, vector index layout)', () => {
   const query = 'how do we handle user login and security?';
   let latDir: string;
   let restoreEnv: () => void;
-  let uncompressedBytes: number;
+  let uncompressed: { blockBytes: number; searchL: number };
   let uncompressedHits: string[];
 
   beforeAll(async () => {
@@ -269,7 +286,7 @@ describe('search (rag, vector index layout)', () => {
     } finally {
       await closeDb(db);
     }
-    uncompressedBytes = await vectorIndexBlockBytes(latDir);
+    uncompressed = await vectorIndexLayout(latDir);
   });
 
   afterAll(() => {
@@ -283,11 +300,12 @@ describe('search (rag, vector index layout)', () => {
     expect(result.matches[0].section.id).toContain('Authentication');
     uncompressedHits = result.matches.map((m) => m.section.id);
 
-    expect(await vectorIndexBlockBytes(latDir)).toBe(uncompressedBytes);
+    expect(uncompressed.searchL).toBe(200); // libSQL's default beam
+    expect(await vectorIndexLayout(latDir)).toEqual(uncompressed);
   });
 
   // @lat: [[search#RAG Tests#Reindex compresses neighbour vectors]]
-  it('rebuilds it with compressed neighbour vectors on reindex', async () => {
+  it('rebuilds it compressed, with a wide search beam, on reindex', async () => {
     const reindexed = await reindexCommand(
       {
         latDir,
@@ -300,9 +318,9 @@ describe('search (rag, vector index layout)', () => {
     expect(reindexed.isError, reindexed.output).toBeFalsy();
 
     // float32 → 1-bit neighbours: 384-dim nodes drop from ~80 KB to ~5 KB.
-    expect(await vectorIndexBlockBytes(latDir)).toBeLessThan(
-      uncompressedBytes / 10,
-    );
+    const rebuilt = await vectorIndexLayout(latDir);
+    expect(rebuilt.blockBytes).toBeLessThan(uncompressed.blockBytes / 10);
+    expect(rebuilt.searchL).toBe(1600);
     const result = await runSearch(latDir, query, 5);
     expect(result.matches.map((m) => m.section.id)).toEqual(uncompressedHits);
   });
