@@ -6,6 +6,7 @@ import {
   copyFile,
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
   rm,
@@ -107,6 +108,31 @@ async function archiveLegacy(cacheDir: string): Promise<string | null> {
   return model;
 }
 
+const GENERATION_FILE = /^(search-[\w-]+\.db)(?:-wal|-shm|-tshm|-journal)?$/;
+
+/**
+ * Delete generation files other than `keep`. Every published update copies the
+ * whole database, so without this each doc edit followed by a search leaves
+ * another full-size copy behind. The generation just replaced is kept: a reader
+ * that read the previous manifest may not have opened its file yet. Files a
+ * process still holds open on Windows are left for a later publish.
+ */
+async function removeOldGenerations(
+  dir: string,
+  keep: readonly (string | undefined)[],
+): Promise<void> {
+  for (const entry of await readdir(dir)) {
+    const generation = GENERATION_FILE.exec(entry)?.[1];
+    if (!generation || keep.includes(generation)) continue;
+    try {
+      await rm(join(dir, entry), { force: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (!['EBUSY', 'EPERM'].includes(code)) throw error;
+    }
+  }
+}
+
 /** Stage a complete generation; failed work cannot replace a usable index. */
 export async function writeIndex<T>(
   latDir: string,
@@ -168,6 +194,7 @@ export async function writeIndex<T>(
       JSON.stringify({ version: INDEX_VERSION, file: name }),
     );
     await rename(temp, join(dir, MANIFEST_FILE));
+    await removeOldGenerations(dir, [name, manifest?.file]);
     return result;
   } catch (error) {
     await db?.close();

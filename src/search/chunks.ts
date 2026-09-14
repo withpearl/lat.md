@@ -47,6 +47,18 @@ export function chunkFile(
   sections: readonly Section[],
   embedder: Embedder,
 ): Passage[] {
+  // Fitting probes count the same context and passage strings repeatedly —
+  // about three times each on a large vault — and every index update re-chunks
+  // the whole project, so counts are memoized for this file.
+  const counts = new Map<string, number>();
+  const countTokens = (text: string) => {
+    let count = counts.get(text);
+    if (count === undefined) {
+      count = embedder.countTokens(text);
+      counts.set(text, count);
+    }
+    return count;
+  };
   const local = embedder.name.startsWith('local:');
   const target = local ? 192 : 512;
   const contextBudget = local ? 48 : 96;
@@ -103,7 +115,7 @@ export function chunkFile(
     const rawContext = `Section: ${section.heading}\nPage: ${file.headingTitles[0] ?? file.path}\nPath: ${headings.slice(0, -1).join(' > ')}`;
     const contextLength = fittingPrefix(
       rawContext,
-      (t) => embedder.countTokens(t) <= contextBudget,
+      (t) => countTokens(t) <= contextBudget,
     );
     const context = rawContext.slice(0, contextLength);
     const path = headings.slice(0, -1).join(' > ');
@@ -112,7 +124,7 @@ export function chunkFile(
     const inputFor = (text: string, extra: string) => {
       const extraSize = fittingPrefix(
         extra,
-        (t) => embedder.countTokens(t) <= contextBudget / 2,
+        (t) => countTokens(t) <= contextBudget / 2,
       );
       const fullContext = [extra.slice(0, extraSize), context]
         .filter(Boolean)
@@ -120,14 +132,14 @@ export function chunkFile(
       const n = fittingPrefix(
         fullContext,
         (c) =>
-          embedder.countTokens(c) <= contextBudget &&
-          embedder.countTokens(`${c}\n\n${text}`) <= embedder.maxInputTokens,
+          countTokens(c) <= contextBudget &&
+          countTokens(`${c}\n\n${text}`) <= embedder.maxInputTokens,
       );
       return n ? `${fullContext.slice(0, n)}\n\n${text}` : text;
     };
     const fits = (text: string, extra = '') =>
-      embedder.countTokens(text) <= target &&
-      embedder.countTokens(inputFor(text, extra)) <= embedder.maxInputTokens;
+      countTokens(text) <= target &&
+      countTokens(inputFor(text, extra)) <= embedder.maxInputTokens;
     const split = (block: MarkdownBlock, extra = ''): Piece[] => {
       const text = source.slice(block.start, block.end);
       if (fits(text, extra))
@@ -205,7 +217,7 @@ export function chunkFile(
       const text = source.slice(piece.start, piece.end);
       if (!text.trim()) return;
       const input = inputFor(text, piece.extra);
-      if (embedder.countTokens(input) > embedder.maxInputTokens)
+      if (countTokens(input) > embedder.maxInputTokens)
         throw new Error('Chunk exceeds embedding limit');
       const inputHash = digest(`${embeddingFingerprint(embedder)}\0${input}`);
       result.push({

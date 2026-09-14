@@ -6,7 +6,12 @@ import {
   type MarkdownProjectAnalysis,
 } from '../project-analysis.js';
 import type { Embedder } from './embedder.js';
-import { chunkFile, digest, embeddingFingerprint } from './chunks.js';
+import {
+  chunkFile,
+  digest,
+  embeddingFingerprint,
+  type Passage,
+} from './chunks.js';
 
 export function projectFingerprint(project: MarkdownProjectAnalysis): string {
   return digest(
@@ -33,6 +38,80 @@ export function identifierTokens(text: string): string[] {
     ),
   ];
 }
+type IndexedSection = MarkdownProjectAnalysis['sections'][number];
+
+/**
+ * Of the given changed sections, those whose stored rows would be rewritten
+ * identically apart from line numbers and passage spans — typically every
+ * section below lines inserted earlier in the same file. Maps each to its chunk
+ * ids in ordinal order, so an update can move them without touching their
+ * lexical rows, identifiers or full-text index.
+ */
+async function movedSections(
+  db: SearchDb,
+  ids: readonly string[],
+  sections: ReadonlyMap<string, IndexedSection>,
+  parents: ReadonlyMap<string, string>,
+  owned: ReadonlyMap<string, Passage[]>,
+): Promise<Map<string, number[]>> {
+  const moved = new Map<string, number[]>();
+  if (!ids.length) return moved;
+  const wanted = new Set(ids);
+  const rows = new Map(
+    (
+      await db.execute('SELECT id,file,heading,content,parent_id FROM sections')
+    ).rows
+      .filter((r) => wanted.has(r.id))
+      .map((r) => [r.id as string, r]),
+  );
+  const chunks = new Map<string, any[]>();
+  for (const c of (
+    await db.execute(
+      'SELECT id,section_id,source_id,ordinal,type,body,heading,path,input_hash FROM chunks ORDER BY section_id,ordinal',
+    )
+  ).rows) {
+    if (!wanted.has(c.section_id)) continue;
+    const list = chunks.get(c.section_id) ?? [];
+    list.push(c);
+    chunks.set(c.section_id, list);
+  }
+  for (const id of ids) {
+    const s = sections.get(id);
+    const row = rows.get(id);
+    if (
+      !s ||
+      !row ||
+      row.file !== s.file ||
+      row.heading !== s.heading ||
+      row.content !== s.firstParagraph ||
+      (row.parent_id ?? null) !== (parents.get(id) ?? null)
+    )
+      continue;
+    const stored = chunks.get(id) ?? [];
+    const next = owned.get(id) ?? [];
+    const same =
+      stored.length === next.length &&
+      next.every((p, i) => {
+        const c = stored[i];
+        return (
+          c.source_id === p.id &&
+          Number(c.ordinal) === p.ordinal &&
+          c.type === p.type &&
+          c.body === p.text &&
+          c.heading === p.heading &&
+          c.path === p.path &&
+          c.input_hash === p.inputHash
+        );
+      });
+    if (same)
+      moved.set(
+        id,
+        stored.map((c) => Number(c.id)),
+      );
+  }
+  return moved;
+}
+
 export async function indexSections(
   latDir: string,
   db: SearchDb,
@@ -100,6 +179,19 @@ export async function indexSections(
       .map(([id]) => id),
   );
   const removed = [...existing.keys()].filter((id) => !sectionHashes.has(id));
+  const firstById = new Map<string, (typeof project.sections)[number]>();
+  for (const s of project.sections)
+    if (!firstById.has(s.id)) firstById.set(s.id, s);
+  const parents = new Map<string, string>();
+  for (const s of project.sections)
+    for (const child of s.children) parents.set(child.id, s.id);
+  const moved = await movedSections(
+    db,
+    [...changed].filter((id) => existing.has(id)),
+    firstById,
+    parents,
+    owned,
+  );
   const stats = {
     added: [...changed].filter((id) => !existing.has(id)).length,
     updated: [...changed].filter((id) => existing.has(id)).length,
@@ -141,12 +233,15 @@ export async function indexSections(
     )
   )
     throw new Error('Embedding backend returned invalid vectors');
+  // Sections whose stored text and structure are unchanged keep their rows;
+  // only their line numbers and passage spans move.
+  const rewritten = new Set([...changed].filter((id) => !moved.has(id)));
   const rebuildFts =
     !existing.size ||
     // Tantivy retains deleted versions in BM25 statistics until rebuilt.
-    stats.updated > 0 ||
+    [...rewritten].some((id) => existing.has(id)) ||
     removed.length > 0 ||
-    passages.filter((p) => changed.has(p.sectionId)).length > 512;
+    passages.filter((p) => rewritten.has(p.sectionId)).length > 512;
   await db.execute('BEGIN');
   try {
     if (rebuildFts) await db.execute('DROP INDEX IF EXISTS chunks_fts');
@@ -155,7 +250,20 @@ export async function indexSections(
         sql: 'INSERT INTO embeddings VALUES (?,vector32(?))',
         args: [entries[i][0], JSON.stringify(vectors[i])],
       });
-    for (const id of [...changed, ...removed]) {
+    for (const [id, chunkIds] of moved) {
+      const s = firstById.get(id)!;
+      await db.execute({
+        sql: 'UPDATE sections SET content_hash=?, start_line=?, end_line=? WHERE id=?',
+        args: [sectionHashes.get(id), s.startLine, s.endLine, id],
+      });
+      const sectionPassages = owned.get(id) ?? [];
+      for (let i = 0; i < chunkIds.length; i++)
+        await db.execute({
+          sql: 'UPDATE chunks SET spans=? WHERE id=?',
+          args: [JSON.stringify(sectionPassages[i].spans), chunkIds[i]],
+        });
+    }
+    for (const id of [...rewritten, ...removed]) {
       await db.execute({
         sql: 'DELETE FROM lexical_chunks WHERE id IN (SELECT id FROM chunks WHERE section_id=?)',
         args: [id],
@@ -170,12 +278,9 @@ export async function indexSections(
       });
       await db.execute({ sql: 'DELETE FROM sections WHERE id=?', args: [id] });
     }
-    const parents = new Map<string, string>();
-    for (const s of project.sections)
-      for (const child of s.children) parents.set(child.id, s.id);
     const inserted = new Set<string>();
     for (const s of project.sections)
-      if (changed.has(s.id) && !inserted.has(s.id)) {
+      if (rewritten.has(s.id) && !inserted.has(s.id)) {
         inserted.add(s.id);
         await db.execute({
           sql: 'INSERT INTO sections VALUES (?,?,?,?,?,?,?,?)',
@@ -192,7 +297,7 @@ export async function indexSections(
         });
       }
     for (const p of passages)
-      if (changed.has(p.sectionId)) {
+      if (rewritten.has(p.sectionId)) {
         const row = (
           await db.execute({
             sql: 'INSERT INTO chunks(source_id,section_id,ordinal,type,spans,body,heading,path,input_hash) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id',

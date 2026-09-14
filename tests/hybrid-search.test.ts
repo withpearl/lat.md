@@ -6,6 +6,7 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   existsSync,
 } from 'node:fs';
 import { cp, rm } from 'node:fs/promises';
@@ -420,6 +421,96 @@ describe('hybrid search', () => {
       await f.db.close();
     }
   });
+  // @lat: [[tests/search#Hybrid Retrieval#Moves sections without rewriting them]]
+  it('updates only positions of moved sections and matches a fresh index', async () => {
+    const original =
+      '# Guide\n\nneedle body\n\n## One\n\napple banana API_TOKEN\n\n## Two\n\napple apple\n';
+    const edited =
+      '# Guide\n\nAdded line.\n\nneedle body\n\n## One\n\napple banana API_TOKEN\n\n## Two\n\napple pear\n';
+    const f = await indexed(original);
+    const rows = async (db: SearchDb) => ({
+      sections: (
+        await db.execute(
+          'SELECT id,file,heading,content,parent_id,start_line,end_line FROM sections ORDER BY id',
+        )
+      ).rows,
+      chunks: (
+        await db.execute(
+          'SELECT source_id,section_id,ordinal,type,spans,body,heading,path,input_hash FROM chunks ORDER BY source_id',
+        )
+      ).rows,
+      identifiers: (
+        await db.execute(
+          'SELECT i.token,c.source_id FROM identifiers i JOIN chunks c ON c.id=i.chunk_id ORDER BY 1,2',
+        )
+      ).rows,
+      scores: (await searchSections(db, 'apple banana', simple, 10)).map(
+        (r) => [r.id, r.lexicalScore, r.rankScore],
+      ),
+    });
+    try {
+      const oneBefore = (
+        await f.db.execute(
+          "SELECT id FROM chunks WHERE section_id='lat.md/guide#Guide#One'",
+        )
+      ).rows;
+      writeFileSync(join(f.lat, 'guide.md'), edited);
+      const execute = vi.spyOn(f.db, 'execute');
+      const stats = await indexSections(f.lat, f.db, simple);
+      const statements = execute.mock.calls.map(([s]) =>
+        typeof s === 'string' ? s : s.sql,
+      );
+      const deleted = execute.mock.calls
+        .filter(([s]) => typeof s === 'object' && /^DELETE /.test(s.sql))
+        .map(([s]) => (s as { args?: unknown[] }).args?.[0]);
+      execute.mockRestore();
+
+      expect(stats).toMatchObject({ added: 0, updated: 3, removed: 0 });
+      // Guide and Two changed text and are replaced; One only moved.
+      expect(new Set(deleted)).toEqual(
+        new Set(['lat.md/guide#Guide', 'lat.md/guide#Guide#Two']),
+      );
+      // A rewritten section still forces the FTS rebuild; moving alone does not.
+      expect(statements).toContain('DROP INDEX IF EXISTS chunks_fts');
+      expect(
+        (
+          await f.db.execute(
+            "SELECT id FROM chunks WHERE section_id='lat.md/guide#Guide#One'",
+          )
+        ).rows,
+      ).toEqual(oneBefore);
+      const fresh = await indexed(edited);
+      try {
+        expect(await rows(f.db)).toEqual(await rows(fresh.db));
+      } finally {
+        await fresh.db.close();
+      }
+
+      writeFileSync(join(f.lat, 'guide.md'), `\n\n${edited}`);
+      const moveOnly = vi.spyOn(f.db, 'execute');
+      await indexSections(f.lat, f.db, simple);
+      const moveStatements = moveOnly.mock.calls.map(([s]) =>
+        typeof s === 'string' ? s : s.sql,
+      );
+      moveOnly.mockRestore();
+      expect(
+        moveStatements.filter((s) =>
+          /^(DROP INDEX|INSERT INTO (sections|chunks|identifiers|lexical_chunks)|DELETE FROM (sections|chunks|identifiers)|DELETE FROM lexical_chunks WHERE id IN)/.test(
+            s,
+          ),
+        ),
+      ).toEqual([]);
+      expect(moveStatements).toContain('UPDATE chunks SET spans=? WHERE id=?');
+      const movedFresh = await indexed(`\n\n${edited}`);
+      try {
+        expect(await rows(f.db)).toEqual(await rows(movedFresh.db));
+      } finally {
+        await movedFresh.db.close();
+      }
+    } finally {
+      await f.db.close();
+    }
+  });
   // @lat: [[tests/search#Hybrid Retrieval#Updates moved sections without scanning]]
   it('looks up every per-section delete by index, including on indexes built before it existed', async () => {
     const f = await indexed(
@@ -430,7 +521,7 @@ describe('hybrid search', () => {
       await ensureSectionsSchema(f.db, 2);
       writeFileSync(
         join(f.lat, 'guide.md'),
-        '\n\n# Guide\n\nneedle body\n\n## Child\n\nAPI_TOKEN value',
+        '# Guide\n\nneedle body\n\n## Child\n\nAPI_TOKEN changed value',
       );
       const execute = vi.spyOn(f.db, 'execute');
       await indexSections(f.lat, f.db, simple);
@@ -481,6 +572,45 @@ describe('hybrid search', () => {
       expect((await searchSections(db, 'needle', simple)).length).toBe(1);
     } finally {
       await db.close();
+    }
+  });
+  // @lat: [[tests/search#Hybrid Retrieval#Keeps the current and previous generation]]
+  it('deletes generations older than the one each publish replaces', async () => {
+    const f = fixture('# Guide\n\nneedle one');
+    const cache = join(f.lat, '.cache');
+    const build = async (db: SearchDb) => {
+      await ensureSectionsSchema(db, 2);
+      await indexSections(f.lat, db, simple);
+      await setStoredModel(db, 'local:test:2');
+    };
+    const published: string[] = [];
+    for (const body of ['needle one', 'needle two', 'needle three']) {
+      writeFileSync(join(f.lat, 'guide.md'), `# Guide\n\n${body}`);
+      if (published.length === 2) {
+        // A writer that crashed before publishing left its staging files.
+        writeFileSync(join(cache, 'search-crashed.db'), '');
+        writeFileSync(join(cache, 'search-crashed.db-wal'), '');
+      }
+      await writeIndex(f.lat, undefined, false, build);
+      published.push(readManifest(cache)!.file);
+    }
+    const generations = new Set(
+      readdirSync(cache)
+        .map((entry) => /^(search-[\w-]+\.db)/.exec(entry)?.[1])
+        .filter(Boolean),
+    );
+    expect(generations).toEqual(new Set(published.slice(1)));
+    for (const [file, text] of [
+      [published[1], 'needle two'],
+      [published[2], 'needle three'],
+    ]) {
+      const db = new SearchDb(join(cache, file));
+      try {
+        const hits = await searchSections(db, 'needle', simple);
+        expect(hits[0].evidence[0].text).toBe(text);
+      } finally {
+        await db.close();
+      }
     }
   });
   // @lat: [[tests/search#Hybrid Retrieval#Preserves FTS rollback and portable copies]]

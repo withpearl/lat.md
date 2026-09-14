@@ -138,6 +138,14 @@ Repeated passage owners collapse before ranks are assigned, and equal channel sc
 
 Adding blank lines changes source locations without re-embedding unchanged contextual inputs.
 
+### Moves sections without rewriting them
+
+When lines are inserted above a section whose text is unchanged, an update changes only its line numbers and passage spans. Its passages, identifiers and full-text entries stay, and every row matches a fresh index.
+
+Moving sections alone does not rebuild the full-text index.
+
+A section whose text changed in the same edit is still replaced. Inserting lines early in a large file used to rewrite every section below them.
+
 ### Updates moved sections without scanning
 
 Every per-section delete an update issues finds its rows through an index, including in an index built before that index existed. Inserting lines early in a large file changes every section after them.
@@ -159,6 +167,12 @@ A failed FTS rebuild restores the prior sections and searchable scores, and a su
 ### Publishes only successful generations
 
 A failed replacement leaves the existing manifest and complete searchable generation intact.
+
+### Keeps the current and previous generation
+
+Publishing a generation deletes every older generation file, including a crashed writer's leftovers, but keeps the one it replaced for readers that read the previous manifest. Both remaining generations stay searchable.
+
+Every published update copies the whole database, so generations used to accumulate: one full-size copy per doc edit followed by a search.
 
 ### Preserves FTS rollback and portable copies
 
