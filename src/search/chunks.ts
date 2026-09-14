@@ -15,6 +15,7 @@ export type Passage = {
   type: string;
   spans: SourceSpan[];
   text: string;
+  /** Embedding input; empty for a passage reused from an index, which is already embedded. */
   input: string;
   inputHash: string;
   heading: string;
@@ -41,11 +42,57 @@ export function fittingPrefix(
   return 0;
 }
 
+/**
+ * Version of the section chunk key. Bump it whenever the passages chunkFile
+ * produces for the same section input can change, so stored passages keyed by
+ * an older version are chunked again instead of reused.
+ */
+const CHUNK_KEY_VERSION = 1;
+
+/** Identifies everything chunking reads for one section, and where it starts. */
+export type SectionChunkKey = { key: string; regionStart: number };
+
+/** A section's stored passages, in ordinal order, with the key they came from. */
+export type StoredSectionPassages = SectionChunkKey & {
+  passages: {
+    type: string;
+    spans: SourceSpan[];
+    text: string;
+    inputHash: string;
+  }[];
+};
+
+/** Lets chunkFile reuse passages an index already stores for unchanged sections. */
+export type ChunkReuse = {
+  /** Filled with every section's current key, whether reused or chunked. */
+  keys: Map<string, SectionChunkKey>;
+  /**
+   * Stored passages for a section. Only return passages whose embeddings exist:
+   * reused passages carry no embedding input.
+   */
+  stored: (sectionId: string) => StoredSectionPassages | undefined;
+};
+
+/** Offsets relative to a section's region, so moving the section keeps its key. */
+function relativeBlocks(
+  blocks: readonly MarkdownBlock[],
+  origin: number,
+): unknown[] {
+  return blocks.map((b) => [
+    b.type,
+    b.language ?? null,
+    b.start - origin,
+    b.end - origin,
+    relativeBlocks(b.children, origin),
+  ]);
+}
+
 /** Every body block is owned once; headings provide context instead of copied subtrees. */
 export function chunkFile(
   file: MarkdownFileAnalysis,
   sections: readonly Section[],
   embedder: Embedder,
+  reuse?: ChunkReuse,
 ): Passage[] {
   // Fitting probes count the same context and passage strings repeatedly —
   // about three times each on a large vault — and every index update re-chunks
@@ -112,13 +159,70 @@ export function chunkFile(
     if (emitted.has(section.id)) continue;
     emitted.add(section.id);
     const headings = section.id.split('#').slice(1);
-    const rawContext = `Section: ${section.heading}\nPage: ${file.headingTitles[0] ?? file.path}\nPath: ${headings.slice(0, -1).join(' > ')}`;
+    const path = headings.slice(0, -1).join(' > ');
+    const page = file.headingTitles[0] ?? file.path;
+    if (reuse) {
+      // The key covers every input below: the context strings, the owned text
+      // from the first owned block to the last (so the gaps that decide merges),
+      // the block structure, and the heading line used when nothing else fits.
+      const owned = own.get(section.id) ?? [];
+      const headingStart = lineStarts[section.startLine - 1] ?? 0;
+      const headingEnd = source.indexOf('\n', headingStart);
+      const regionStart = owned[0]?.start ?? headingStart;
+      const regionEnd = owned.at(-1)?.end ?? headingStart;
+      const key = digest(
+        JSON.stringify([
+          CHUNK_KEY_VERSION,
+          section.id,
+          section.heading,
+          page,
+          headingStart - regionStart,
+          source.slice(
+            headingStart,
+            headingEnd < 0 ? source.length : headingEnd,
+          ),
+          relativeBlocks(owned, regionStart),
+          source.slice(regionStart, regionEnd),
+        ]),
+      );
+      reuse.keys.set(section.id, { key, regionStart });
+      const prior = reuse.stored(section.id);
+      if (prior?.key === key) {
+        const delta = regionStart - prior.regionStart;
+        const moved = prior.passages.map((p, ordinal) => ({
+          id: `${section.id}:${ordinal}`,
+          sectionId: section.id,
+          ordinal,
+          type: p.type,
+          spans: p.spans.map((s) => ({
+            start: s.start + delta,
+            end: s.end + delta,
+            startLine: lineAt(s.start + delta),
+            endLine: lineAt(Math.max(s.start + delta, s.end + delta - 1)),
+          })),
+          text: p.text,
+          input: '',
+          inputHash: p.inputHash,
+          heading: section.heading,
+          path,
+        }));
+        // Stored rows are trusted only while they still match the source text.
+        if (
+          moved.every(
+            (p) => source.slice(p.spans[0].start, p.spans[0].end) === p.text,
+          )
+        ) {
+          result.push(...moved);
+          continue;
+        }
+      }
+    }
+    const rawContext = `Section: ${section.heading}\nPage: ${page}\nPath: ${path}`;
     const contextLength = fittingPrefix(
       rawContext,
       (t) => countTokens(t) <= contextBudget,
     );
     const context = rawContext.slice(0, contextLength);
-    const path = headings.slice(0, -1).join(' > ');
     let ordinal = 0;
     type Piece = { start: number; end: number; type: string; extra: string };
     const inputFor = (text: string, extra: string) => {

@@ -148,6 +148,9 @@ export async function ensureSectionsSchema(
     // delete scans every identifier, and inserting lines early in a large file
     // changes every section after them.
     'CREATE INDEX IF NOT EXISTS identifiers_chunk ON identifiers(chunk_id)',
+    // The chunk key each section's stored passages came from, so an update can
+    // reuse them instead of chunking the section again.
+    'CREATE TABLE IF NOT EXISTS section_chunk_keys (section_id TEXT PRIMARY KEY, chunk_key TEXT NOT NULL, region_start INTEGER NOT NULL)',
   ])
     await db.execute(sql);
   const oldIndex = (
@@ -161,6 +164,7 @@ export async function ensureSectionsSchema(
 }
 export async function dropSections(db: SearchDb): Promise<void> {
   for (const name of [
+    'section_chunk_keys',
     'identifiers',
     'lexical_chunks',
     'chunks',

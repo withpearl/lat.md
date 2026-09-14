@@ -11,6 +11,8 @@ import {
   digest,
   embeddingFingerprint,
   type Passage,
+  type SectionChunkKey,
+  type StoredSectionPassages,
 } from './chunks.js';
 
 export function projectFingerprint(project: MarkdownProjectAnalysis): string {
@@ -39,6 +41,45 @@ export function identifierTokens(text: string): string[] {
   ];
 }
 type IndexedSection = MarkdownProjectAnalysis['sections'][number];
+
+/**
+ * Stored passages for sections with a recorded chunk key, usable by chunkFile
+ * only when every passage is still embedded and their ordinals are contiguous.
+ */
+async function storedPassages(
+  db: SearchDb,
+  keys: ReadonlyMap<string, SectionChunkKey>,
+  embedded: ReadonlySet<string>,
+): Promise<Map<string, StoredSectionPassages>> {
+  const stored = new Map<string, StoredSectionPassages>();
+  if (!keys.size) return stored;
+  const unusable = new Set<string>();
+  for (const c of (
+    await db.execute(
+      'SELECT section_id,ordinal,type,spans,body,input_hash FROM chunks ORDER BY section_id,ordinal',
+    )
+  ).rows) {
+    const key = keys.get(c.section_id);
+    if (!key || unusable.has(c.section_id)) continue;
+    const entry = stored.get(c.section_id) ?? { ...key, passages: [] };
+    if (
+      !embedded.has(c.input_hash) ||
+      Number(c.ordinal) !== entry.passages.length
+    ) {
+      unusable.add(c.section_id);
+      stored.delete(c.section_id);
+      continue;
+    }
+    entry.passages.push({
+      type: c.type,
+      spans: JSON.parse(c.spans),
+      text: c.body,
+      inputHash: c.input_hash,
+    });
+    stored.set(c.section_id, entry);
+  }
+  return stored;
+}
 
 /**
  * Of the given changed sections, those whose stored rows would be rewritten
@@ -141,10 +182,28 @@ export async function indexSections(
   const files = new Map(
     [...project.files.values()].map((f) => [f.projectPath, f]),
   );
+  const storedHashes = new Set<string>(
+    (await db.execute('SELECT hash FROM embeddings')).rows.map((r) => r.hash),
+  );
+  const storedKeys = new Map<string, SectionChunkKey>(
+    (
+      await db.execute(
+        'SELECT section_id,chunk_key,region_start FROM section_chunk_keys',
+      )
+    ).rows.map((r) => [
+      r.section_id,
+      { key: r.chunk_key, regionStart: Number(r.region_start) },
+    ]),
+  );
+  const stored = await storedPassages(db, storedKeys, storedHashes);
+  const keys = new Map<string, SectionChunkKey>();
   const passages = [...byFile].flatMap(([path, sections]) => {
     const file = files.get(path);
     if (!file) throw new Error(`Missing analyzed file: ${path}`);
-    return chunkFile(file, sections, embedder);
+    return chunkFile(file, sections, embedder, {
+      keys,
+      stored: (id) => stored.get(id),
+    });
   });
   const existing = new Map<string, string>(
     (await db.execute('SELECT id,content_hash FROM sections')).rows.map((r) => [
@@ -210,14 +269,13 @@ export async function indexSections(
     }
     return stats;
   }
-  const storedHashes = new Set(
-    (await db.execute('SELECT hash FROM embeddings')).rows.map((r) => r.hash),
-  );
   const missing = new Map(
     passages
       .filter((p) => !storedHashes.has(p.inputHash))
       .map((p) => [p.inputHash, p.input]),
   );
+  if ([...missing.values()].some((input) => !input))
+    throw new Error('A reused search passage has no stored embedding');
   const entries = [...missing];
   const vectors = entries.length
     ? await embedder.embed(
@@ -277,6 +335,22 @@ export async function indexSections(
         args: [id],
       });
       await db.execute({ sql: 'DELETE FROM sections WHERE id=?', args: [id] });
+      await db.execute({
+        sql: 'DELETE FROM section_chunk_keys WHERE section_id=?',
+        args: [id],
+      });
+    }
+    for (const [id, key] of keys) {
+      const prior = storedKeys.get(id);
+      if (
+        rewritten.has(id) ||
+        prior?.key !== key.key ||
+        prior.regionStart !== key.regionStart
+      )
+        await db.execute({
+          sql: 'INSERT OR REPLACE INTO section_chunk_keys VALUES (?,?,?)',
+          args: [id, key.key, key.regionStart],
+        });
     }
     const inserted = new Set<string>();
     for (const s of project.sections)

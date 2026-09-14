@@ -55,6 +55,29 @@ const simple = {
   embed: async (texts: string[]) =>
     texts.map((t) => (t.includes('needle') ? [1, 0] : [0, 1])),
 };
+/** Every stored row that an incremental update must leave equal to a fresh index. */
+async function indexRows(db: SearchDb, query: string) {
+  const rows = async (sql: string) => (await db.execute(sql)).rows;
+  return {
+    sections: await rows(
+      'SELECT id,file,heading,content,parent_id,start_line,end_line FROM sections ORDER BY id',
+    ),
+    chunks: await rows(
+      'SELECT source_id,section_id,ordinal,type,spans,body,heading,path,input_hash FROM chunks ORDER BY source_id',
+    ),
+    identifiers: await rows(
+      'SELECT i.token,c.source_id FROM identifiers i JOIN chunks c ON c.id=i.chunk_id ORDER BY 1,2',
+    ),
+    chunkKeys: await rows(
+      'SELECT section_id,chunk_key,region_start FROM section_chunk_keys ORDER BY section_id',
+    ),
+    scores: (await searchSections(db, query, simple, 10)).map((r) => [
+      r.id,
+      r.lexicalScore,
+      r.rankScore,
+    ]),
+  };
+}
 async function indexed(markdown: string) {
   const f = fixture(markdown),
     db = new SearchDb(join(f.root, 'test.db'));
@@ -421,6 +444,64 @@ describe('hybrid search', () => {
       await f.db.close();
     }
   });
+  // @lat: [[tests/search#Hybrid Retrieval#Reuses passages of unchanged sections]]
+  it('chunks only sections whose input changed and matches a fresh index', async () => {
+    const doc = (intro: string, beta: string) =>
+      `# Guide\n\n${intro}\n\n## Alpha\n\nalpha keeps its text.\n\n## Beta\n\n${beta}\n\n## Gamma\n\ngamma keeps its text.\n`;
+    const f = await indexed(doc('Intro.', 'beta before.'));
+    const counted = (engine: {
+      countTokens: { mock: { calls: string[][] } };
+    }) => engine.countTokens.mock.calls.map(([text]) => text).join('\n');
+    const update = async (markdown: string) => {
+      writeFileSync(join(f.lat, 'guide.md'), markdown);
+      const engine = {
+        ...simple,
+        countTokens: vi.fn(simple.countTokens),
+        embed: vi.fn(simple.embed),
+      };
+      await indexSections(f.lat, f.db, engine);
+      const fresh = await indexed(markdown);
+      try {
+        expect(await indexRows(f.db, 'keeps text')).toEqual(
+          await indexRows(fresh.db, 'keeps text'),
+        );
+      } finally {
+        await fresh.db.close();
+      }
+      return engine;
+    };
+    try {
+      // A new paragraph moves Alpha, Beta and Gamma; Beta's text also changes.
+      const first = await update(
+        doc('Intro.\n\nA new paragraph.', 'beta after.'),
+      );
+      expect(counted(first)).toContain('beta after.');
+      expect(counted(first)).not.toContain('alpha keeps');
+      expect(counted(first)).not.toContain('gamma keeps');
+      expect(first.embed.mock.calls.flat(2).join('\n')).not.toContain(
+        'alpha keeps',
+      );
+
+      // An index without recorded keys chunks everything once, then reuses.
+      await f.db.execute('DROP TABLE section_chunk_keys');
+      await ensureSectionsSchema(f.db, 2);
+      const unkeyed = await update(doc('Intro again.', 'beta after.'));
+      expect(counted(unkeyed)).toContain('alpha keeps');
+      const rekeyed = await update(doc('Intro once more.', 'beta after.'));
+      expect(counted(rekeyed)).not.toContain('alpha keeps');
+
+      // A stored passage whose embedding is gone is chunked and embedded again.
+      await f.db.execute({
+        sql: "DELETE FROM embeddings WHERE hash=(SELECT input_hash FROM chunks WHERE section_id='lat.md/guide#Guide#Gamma')",
+      });
+      const repaired = await update(doc('Intro, last time.', 'beta after.'));
+      expect(repaired.embed.mock.calls.flat(2).join('\n')).toContain(
+        'gamma keeps',
+      );
+    } finally {
+      await f.db.close();
+    }
+  });
   // @lat: [[tests/search#Hybrid Retrieval#Moves sections without rewriting them]]
   it('updates only positions of moved sections and matches a fresh index', async () => {
     const original =
@@ -428,26 +509,7 @@ describe('hybrid search', () => {
     const edited =
       '# Guide\n\nAdded line.\n\nneedle body\n\n## One\n\napple banana API_TOKEN\n\n## Two\n\napple pear\n';
     const f = await indexed(original);
-    const rows = async (db: SearchDb) => ({
-      sections: (
-        await db.execute(
-          'SELECT id,file,heading,content,parent_id,start_line,end_line FROM sections ORDER BY id',
-        )
-      ).rows,
-      chunks: (
-        await db.execute(
-          'SELECT source_id,section_id,ordinal,type,spans,body,heading,path,input_hash FROM chunks ORDER BY source_id',
-        )
-      ).rows,
-      identifiers: (
-        await db.execute(
-          'SELECT i.token,c.source_id FROM identifiers i JOIN chunks c ON c.id=i.chunk_id ORDER BY 1,2',
-        )
-      ).rows,
-      scores: (await searchSections(db, 'apple banana', simple, 10)).map(
-        (r) => [r.id, r.lexicalScore, r.rankScore],
-      ),
-    });
+    const rows = (db: SearchDb) => indexRows(db, 'apple banana');
     try {
       const oneBefore = (
         await f.db.execute(

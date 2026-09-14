@@ -138,6 +138,14 @@ Repeated passage owners collapse before ranks are assigned, and equal channel sc
 
 Adding blank lines changes source locations without re-embedding unchanged contextual inputs.
 
+### Reuses passages of unchanged sections
+
+An update chunks only sections whose text, context or block structure changed; others reuse their stored passages at their new positions, and every row matches a fresh index.
+
+An index without recorded chunk keys chunks everything once and reuses afterwards. A stored passage whose embedding is missing is chunked and embedded again.
+
+Every update used to chunk the whole project, about 7 seconds on a 16,000-section vault even when one section changed.
+
 ### Moves sections without rewriting them
 
 When lines are inserted above a section whose text is unchanged, an update changes only its line numbers and passage spans. Its passages, identifiers and full-text entries stay, and every row matches a fresh index.
