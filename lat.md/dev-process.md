@@ -100,6 +100,22 @@ Commands for running the test suite.
 
 Every test run includes a full `tsc --noEmit` pass over the entire codebase. If it doesn't typecheck, it doesn't pass.
 
+### Search Index Bench
+
+`scripts/search-bench.ts` answers whether a change to the vector index changes what `lat search` returns, on a real corpus rather than the 9-section fixture.
+
+It queries each index through the `searchSections` of the lat install that built it — so that build's own libSQL answers `vector_top_k` — with every query embedded once, and scores each against exact nearest neighbours from a full `vector_distance_cos` scan with no ANN index. Output is `report.md` (#1-hit stability, top-5/top-10 overlap histograms, rank displacement, recall against the scan, and every query whose top-10 changed shown side by side), plus `summary.json` and `results.json`.
+
+Compare a fresh rebuild on the current release as well as the candidate: an index grown by months of incremental `lat search` updates can already differ from a one-pass rebuild, and without that control the drift is blamed on the change. Point it at `cp -c` copies, never a live `.cache`.
+
+```bash
+pnpm exec tsx scripts/search-bench.ts --queries queries.json \
+  --index L=/scratch/live,/prefix-current/lib/node_modules/lat.md \
+  --index A=/scratch/rebuilt,/prefix-current/lib/node_modules/lat.md \
+  --index B=/scratch/candidate,/prefix-candidate/lib/node_modules/lat.md \
+  --truth A --baseline L --out /scratch/bench
+```
+
 ### Continuous Integration
 
 CI (`.github/workflows/ci.yml`) runs the full `pnpm buildall` + `vitest` suite on a `[ubuntu-latest, windows-latest]` matrix (`fail-fast: false`) so platform-specific regressions — path separators (see [[parser#Short Ref Resolution]]) and line endings — are caught before release.
