@@ -311,14 +311,49 @@ describe('hybrid search', () => {
       'An introduction before any heading, like a directory README.\n\n' +
         '# Guide\n\nGuide body with a needle.\n',
     );
-    const passages = (
-      await db.execute('SELECT section_id, body FROM chunks ORDER BY id')
-    ).rows.map((r) => [String(r.section_id), String(r.body)]);
-    expect(passages).toEqual([
-      ['lat.md/guide#Guide', 'Guide body with a needle.'],
-    ]);
-    const results = await searchSections(db, 'needle', simple, 5);
-    expect(results.map((r) => r.id)).toEqual(['lat.md/guide#Guide']);
+    try {
+      const passages = (
+        await db.execute('SELECT section_id, body FROM chunks ORDER BY id')
+      ).rows.map((r) => [String(r.section_id), String(r.body)]);
+      expect(passages).toEqual([
+        ['lat.md/guide#Guide', 'Guide body with a needle.'],
+      ]);
+      const results = await searchSections(db, 'needle', simple, 5);
+      expect(results.map((r) => r.id)).toEqual(['lat.md/guide#Guide']);
+    } finally {
+      await db.close();
+    }
+  });
+  // @lat: [[tests/search#Hybrid Retrieval#Indexes a repeated heading path once]]
+  it('indexes two headings with the same path once, keeping both bodies', async () => {
+    const { db } = await indexed(
+      '# Guide\n\nIntro.\n\n## Same\n\nFirst body with a needle.\n\n' +
+        '## Other\n\nBetween.\n\n## Same\n\nSecond body.\n',
+    );
+    try {
+      const sections = (
+        await db.execute(
+          "SELECT id FROM sections WHERE id = 'lat.md/guide#Guide#Same'",
+        )
+      ).rows;
+      expect(sections).toHaveLength(1);
+      const bodies = (
+        await db.execute(
+          "SELECT source_id, body FROM chunks WHERE section_id = 'lat.md/guide#Guide#Same' ORDER BY ordinal",
+        )
+      ).rows.map((r) => [String(r.source_id), String(r.body)]);
+      expect(bodies.map(([, body]) => body).join('\n\n')).toContain(
+        'First body with a needle.',
+      );
+      expect(bodies.map(([, body]) => body).join('\n\n')).toContain(
+        'Second body.',
+      );
+      expect(new Set(bodies.map(([id]) => id)).size).toBe(bodies.length);
+      const results = await searchSections(db, 'needle', simple, 5);
+      expect(results[0].id).toBe('lat.md/guide#Guide#Same');
+    } finally {
+      await db.close();
+    }
   });
   // @lat: [[tests/search#Hybrid Retrieval#Rejects local embedding truncation]]
   it('uses the real local tokenizer and rejects oversized embedding input', async () => {

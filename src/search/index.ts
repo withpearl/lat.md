@@ -81,6 +81,9 @@ export async function indexSections(
     owned.set(p.sectionId, list);
   }
   for (const s of project.sections) {
+    // A repeated heading path yields a repeated id; the first occurrence stands
+    // for it here and in the sections table.
+    if (sectionHashes.has(s.id)) continue;
     sectionHashes.set(
       s.id,
       digest(
@@ -170,8 +173,10 @@ export async function indexSections(
     const parents = new Map<string, string>();
     for (const s of project.sections)
       for (const child of s.children) parents.set(child.id, s.id);
+    const inserted = new Set<string>();
     for (const s of project.sections)
-      if (changed.has(s.id))
+      if (changed.has(s.id) && !inserted.has(s.id)) {
+        inserted.add(s.id);
         await db.execute({
           sql: 'INSERT INTO sections VALUES (?,?,?,?,?,?,?,?)',
           args: [
@@ -185,6 +190,7 @@ export async function indexSections(
             s.endLine,
           ],
         });
+      }
     for (const p of passages)
       if (changed.has(p.sectionId)) {
         const row = (

@@ -93,7 +93,12 @@ export function chunkFile(
     own.set(owner.id, blocks);
   }
   const result: Passage[] = [];
+  const emitted = new Set<string>();
   for (const section of sections) {
+    // Two headings with the same path in one file share an id. Their blocks are
+    // pooled under that id above, so the id's passages are emitted once.
+    if (emitted.has(section.id)) continue;
+    emitted.add(section.id);
     const headings = section.id.split('#').slice(1);
     const rawContext = `Section: ${section.heading}\nPage: ${file.headingTitles[0] ?? file.path}\nPath: ${headings.slice(0, -1).join(' > ')}`;
     const contextLength = fittingPrefix(

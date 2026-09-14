@@ -116,6 +116,12 @@ A file that opens with text before any heading, such as a directory README, stil
 
 It used to abort the whole index build with "No section owns", making search unusable for every file in the vault.
 
+### Indexes a repeated heading path once
+
+Two headings with the same path in one file share a section id. The index stores that section once, with passages from both bodies, so each stays searchable and every passage id is unique.
+
+A repeated id used to fail the whole build on a unique constraint after every passage had already been embedded.
+
 ### Rejects local embedding truncation
 
 The real local tokenizer counts the full input and the WASM embedder rejects text beyond its limit, including tokenizer configurations containing an embedded truncation setting.
