@@ -146,6 +146,14 @@ An index without recorded chunk keys chunks everything once and reuses afterward
 
 Every update used to chunk the whole project, about 7 seconds on a 16,000-section vault even when one section changed.
 
+### Shard roots of a split folder are not searchable
+
+A file inside a directory whose index file has the same top heading, as every shard of a split file repeats `# Tests`, gets no passages for that root section.
+
+Its other sections, the index's root, and top-level files with a matching title are indexed as usual.
+
+Without this, splitting a file into 64 shards added 64 near-identical root results for queries like "test", and shifted term statistics for the rest.
+
 ### Moves sections without rewriting them
 
 When lines are inserted above a section whose text is unchanged, an update changes only its line numbers and passage spans. Its passages, identifiers and full-text entries stay, and every row matches a fresh index.

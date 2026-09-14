@@ -502,6 +502,48 @@ describe('hybrid search', () => {
       await f.db.close();
     }
   });
+  // @lat: [[tests/search#Hybrid Retrieval#Shard roots of a split folder are not searchable]]
+  it('indexes no passages for shard roots that repeat their folder index heading', async () => {
+    const f = fixture('# Guide\n\nThe guide mentions specs too.\n');
+    mkdirSync(join(f.lat, 'specs'));
+    writeFileSync(
+      join(f.lat, 'specs', 'specs.md'),
+      '# Specs\n\nTest specifications for the product.\n',
+    );
+    for (const [name, area] of [
+      ['a', 'Bills'],
+      ['b', 'Invoices'],
+    ])
+      writeFileSync(
+        join(f.lat, 'specs', `${name}.md`),
+        `# Specs\n\nTest specifications stored in shard ${name}.\n\n## ${area}\n\nSpecs for ${area}.\n`,
+      );
+    writeFileSync(
+      join(f.lat, 'notes.md'),
+      '# Specs\n\nA top-level file whose title happens to match.\n',
+    );
+    const db = new SearchDb(join(f.root, 'test.db'));
+    await ensureMeta(db);
+    await ensureSectionsSchema(db, 2);
+    try {
+      await indexSections(f.lat, db, simple);
+      const owners = new Set(
+        (await db.execute('SELECT DISTINCT section_id FROM chunks')).rows.map(
+          (r) => r.section_id,
+        ),
+      );
+      expect(owners.has('lat.md/specs/a#Specs')).toBe(false);
+      expect(owners.has('lat.md/specs/b#Specs')).toBe(false);
+      expect(owners.has('lat.md/specs/a#Specs#Bills')).toBe(true);
+      expect(owners.has('lat.md/specs/specs#Specs')).toBe(true);
+      expect(owners.has('lat.md/notes#Specs')).toBe(true);
+      const hits = await searchSections(db, 'test specifications', simple, 10);
+      expect(hits.map((h) => h.id)).not.toContain('lat.md/specs/a#Specs');
+      expect(hits.map((h) => h.id)).toContain('lat.md/specs/specs#Specs');
+    } finally {
+      await db.close();
+    }
+  });
   // @lat: [[tests/search#Hybrid Retrieval#Moves sections without rewriting them]]
   it('updates only positions of moved sections and matches a fresh index', async () => {
     const original =

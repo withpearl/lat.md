@@ -6,6 +6,7 @@ import {
   type MarkdownProjectAnalysis,
 } from '../project-analysis.js';
 import type { Embedder } from './embedder.js';
+import { indexedDirectory } from '../lattice-model.js';
 import {
   chunkFile,
   digest,
@@ -41,6 +42,35 @@ export function identifierTokens(text: string): string[] {
   ];
 }
 type IndexedSection = MarkdownProjectAnalysis['sections'][number];
+
+/**
+ * Root sections that only continue their folder: the top heading of a file
+ * inside a directory whose index file has the same top heading, as every shard
+ * of a file split into a folder repeats it (`# Tests`). They remain sections for
+ * refs and checks but get no search passages, so a split adds no near-identical
+ * results and leaves term statistics as they were.
+ */
+function folderContinuationRoots(
+  sections: readonly IndexedSection[],
+): Set<string> {
+  const indexRoots = new Map<string, Set<string>>();
+  for (const s of sections) {
+    const dir = s.depth === 1 ? indexedDirectory(s.file) : null;
+    if (!dir) continue;
+    const headings = indexRoots.get(dir.toLowerCase()) ?? new Set<string>();
+    headings.add(s.heading.toLowerCase());
+    indexRoots.set(dir.toLowerCase(), headings);
+  }
+  const roots = new Set<string>();
+  if (!indexRoots.size) return roots;
+  for (const s of sections) {
+    if (s.depth !== 1 || indexedDirectory(s.file)) continue;
+    const slash = s.file.lastIndexOf('/');
+    const dir = slash === -1 ? '' : s.file.slice(0, slash).toLowerCase();
+    if (indexRoots.get(dir)?.has(s.heading.toLowerCase())) roots.add(s.id);
+  }
+  return roots;
+}
 
 /**
  * Stored passages for sections with a recorded chunk key, usable by chunkFile
@@ -197,14 +227,17 @@ export async function indexSections(
   );
   const stored = await storedPassages(db, storedKeys, storedHashes);
   const keys = new Map<string, SectionChunkKey>();
-  const passages = [...byFile].flatMap(([path, sections]) => {
-    const file = files.get(path);
-    if (!file) throw new Error(`Missing analyzed file: ${path}`);
-    return chunkFile(file, sections, embedder, {
-      keys,
-      stored: (id) => stored.get(id),
-    });
-  });
+  const continuations = folderContinuationRoots(project.sections);
+  const passages = [...byFile]
+    .flatMap(([path, sections]) => {
+      const file = files.get(path);
+      if (!file) throw new Error(`Missing analyzed file: ${path}`);
+      return chunkFile(file, sections, embedder, {
+        keys,
+        stored: (id) => stored.get(id),
+      });
+    })
+    .filter((p) => !continuations.has(p.sectionId));
   const existing = new Map<string, string>(
     (await db.execute('SELECT id,content_hash FROM sections')).rows.map((r) => [
       r.id,
