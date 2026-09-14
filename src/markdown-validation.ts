@@ -1,3 +1,4 @@
+import { wikiLinkPattern } from './extensions/wiki-link/pattern.js';
 import { flattenSections, type MdLink, type Section } from './lattice-model.js';
 
 export const MAX_SECTION_SUMMARY_LENGTH = 250;
@@ -63,7 +64,7 @@ export function parseLocalMarkdownTarget(
 
 /** Count summary text while excluding `[[...]]` markers and link content. */
 export function sectionSummaryLength(body: string): number {
-  return body.replace(/\[\[[^\]]*\]\]/g, '').length;
+  return body.replace(wikiLinkPattern('g'), '').length;
 }
 
 /** Validate rules that need no facts outside one parsed Markdown file. */

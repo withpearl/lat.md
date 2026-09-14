@@ -11,6 +11,7 @@ import { checkMd, checkCodeRefs, checkIndex, checkSections } from './check.js';
 import { CheckRunContext } from './check-context.js';
 import { isSourceFileExtension } from '../source-formats.js';
 import { commandProjectAnalysis } from '../project-analysis.js';
+import { wikiLinkPattern } from '../extensions/wiki-link/pattern.js';
 
 function outputPromptSubmit(context: string): void {
   process.stdout.write(
@@ -49,7 +50,7 @@ async function readStdin(): Promise<string> {
 }
 
 function hasWikiLinks(text: string): boolean {
-  return /\[\[[^\]]+\]\]/.test(text);
+  return wikiLinkPattern().test(text);
 }
 
 function makeHookCtx(latDir: string): CmdContext {

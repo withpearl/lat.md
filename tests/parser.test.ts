@@ -88,6 +88,29 @@ describe('parse', () => {
     expect(wikiLinks[1].value).toBe('Page B');
   });
 
+  it('parses a wiki link whose path contains bracketed segments', () => {
+    const target =
+      'web/src/app/c/[companySlug]/accounts/[accountId]/page.tsx#AccountPage';
+    const tree = parse(
+      `See [[${target}]] and [[${target}|the [account] page]] then [[Page B]]`,
+    );
+    const wikiLinks: WikiLink[] = [];
+    visit(tree, 'wikiLink', (node) => {
+      wikiLinks.push(node as WikiLink);
+    });
+
+    expect(wikiLinks.map((l) => [l.value, l.data.alias])).toEqual([
+      [target, null],
+      [target, 'the [account] page'],
+      ['Page B', null],
+    ]);
+    const again: WikiLink[] = [];
+    visit(parse(toMarkdown(tree)), 'wikiLink', (node) => {
+      again.push(node as WikiLink);
+    });
+    expect(again.map((l) => l.value)).toEqual([target, target, 'Page B']);
+  });
+
   it('does not parse incomplete wiki links', () => {
     const tree = parse('See [not a link] and [[also not');
     const wikiLinks: WikiLink[] = [];

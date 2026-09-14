@@ -5,13 +5,14 @@ import {
   type SectionMatch,
 } from '../lattice-model.js';
 import type { CmdContext, CmdResult } from '../context.js';
+import { wikiLinkPattern } from '../extensions/wiki-link/pattern.js';
 import type { ResolvedExternalContent } from '../external-sources.js';
 import {
   commandProjectAnalysis,
   commandProjectSession,
 } from '../project-analysis.js';
 
-const WIKI_LINK_RE = /\[\[([^\]]+)\]\]/g;
+const WIKI_LINK_RE = wikiLinkPattern('g');
 
 function formatLocation(section: Section, projectRoot: string): string {
   const relPath = relative(process.cwd(), join(projectRoot, section.filePath));

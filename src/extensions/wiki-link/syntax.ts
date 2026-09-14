@@ -22,6 +22,8 @@ import './types.js';
 const ALIAS_DIVIDER = '|';
 const OPEN = '[[';
 const CLOSE = ']]';
+const LEFT_BRACKET = 91;
+const RIGHT_BRACKET = 93;
 
 function tokenize(
   this: TokenizeContext,
@@ -34,6 +36,18 @@ function tokenize(
   let aliasCursor = 0;
   let hasData = false;
   let hasAlias = false;
+  // Brackets opened inside the link, such as a `[companySlug]` route segment in
+  // a source path. A `]` that closes one of them is text, not the end marker.
+  let depth = 0;
+
+  /** Consume a balanced inner bracket as text; false when `code` is not one. */
+  function consumeInnerBracket(code: Code): boolean {
+    if (code === LEFT_BRACKET) depth++;
+    else if (code === RIGHT_BRACKET && depth > 0) depth--;
+    else return false;
+    effects.consume(code);
+    return true;
+  }
 
   return start;
 
@@ -63,7 +77,12 @@ function tokenize(
   }
 
   function consumeTarget(code: Code): State | undefined {
-    if (code === ALIAS_DIVIDER.charCodeAt(aliasCursor)) {
+    if (consumeInnerBracket(code)) {
+      hasData = true;
+      return consumeTarget;
+    }
+
+    if (depth === 0 && code === ALIAS_DIVIDER.charCodeAt(aliasCursor)) {
       if (!hasData) return nok(code);
       effects.exit('wikiLinkTarget');
       effects.enter('wikiLinkAliasMarker');
@@ -102,6 +121,11 @@ function tokenize(
   }
 
   function consumeAlias(code: Code): State | undefined {
+    if (consumeInnerBracket(code)) {
+      hasAlias = true;
+      return consumeAlias;
+    }
+
     if (code === CLOSE.charCodeAt(closeCursor)) {
       if (!hasAlias) return nok(code);
       effects.exit('wikiLinkAlias');

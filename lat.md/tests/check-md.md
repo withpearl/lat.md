@@ -23,6 +23,12 @@ Given files where all wiki links resolve to existing sections, [[cli#check#md]] 
 
 Wiki links without fragments accept existing project-root-relative regular files and directories, including unsupported or absent extensions, while supported source symbols still resolve normally.
 
+### Validates links to paths with bracketed segments
+
+Links to source files under route segments such as `[companySlug]` or `[[...rest]]` resolve like any other source link: a real symbol passes, and a missing one is reported as a missing symbol rather than as an undefined Markdown reference.
+
+These links used to be read as a broken wiki link plus stray brackets, so they were never checked.
+
 ### Passes with C enum value links
 
 Given `lat.md` links to C enum members, including anonymous enums and `typedef enum` members, [[cli#check#md]] should resolve those values as valid source symbols.

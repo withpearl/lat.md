@@ -13,15 +13,11 @@ function handler(
   _info: Info,
 ): string {
   const exit = state.enter('wikiLink');
-  const target = state.safe(node.value, { before: '[', after: ']' });
-
-  let value: string;
-  if (node.data.alias) {
-    const alias = state.safe(node.data.alias, { before: '[', after: ']' });
-    value = `[[${target}|${alias}]]`;
-  } else {
-    value = `[[${target}]]`;
-  }
+  // The tokenizer reads link text raw, with no backslash escapes, so escaping
+  // here would add characters the next parse keeps, e.g. `\[companySlug]`.
+  const value = node.data.alias
+    ? `[[${node.value}|${node.data.alias}]]`
+    : `[[${node.value}]]`;
 
   exit();
   return value;

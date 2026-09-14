@@ -19,11 +19,13 @@ import {
   checkMd,
   checkCodeRefs,
   checkIndex,
+  checkLinks,
   checkSections,
 } from '../src/cli/check.js';
 import { discoverSourceFiles, scanCodeRefs } from '../src/code-refs.js';
 import { findRefs } from '../src/cli/refs.js';
 import { getSection, formatSectionOutput } from '../src/cli/section.js';
+import { sectionSummaryLength } from '../src/markdown-validation.js';
 
 // eslint-disable-next-line no-control-regex
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -1300,6 +1302,20 @@ describe('source-ref-py-valid', () => {
   });
 });
 
+describe('source-ref-bracketed-path', () => {
+  // @lat: [[tests/check-md#Passes with valid links#Validates links to paths with bracketed segments]]
+  it('resolves links under bracketed route segments and reports only the missing symbol', async () => {
+    expect(await checkLinks(latDir('source-ref-bracketed-path'))).toEqual([]);
+    const { errors } = await checkMd(latDir('source-ref-bracketed-path'));
+    expect(errors.map((e) => [e.target, e.message])).toEqual([
+      [
+        'src/app/(authenticated)/c/[companySlug]/[[...rest]]/page.tsx#Missing',
+        expect.stringContaining('symbol "Missing" not found'),
+      ],
+    ]);
+  });
+});
+
 describe('error-source-ref-ts-missing', () => {
   it('check md reports all missing TS symbols', async () => {
     const { errors } = await checkMd(latDir('error-source-ref-ts-missing'));
@@ -2064,6 +2080,11 @@ describe('error-long-body', () => {
       (e) => e.target === 'lat.md/notes#Notes#With Links',
     );
     expect(linkSection).toBeUndefined();
+    expect(
+      sectionSummaryLength(
+        'Page [[web/app/c/[companySlug]/[[...rest]]/page.tsx#Page|the page]] body',
+      ),
+    ).toBe('Page  body'.length);
   });
 });
 

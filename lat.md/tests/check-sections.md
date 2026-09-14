@@ -19,3 +19,5 @@ Given a section whose first paragraph exceeds 250 characters (after excluding `[
 ## Excludes wiki link content from character count
 
 Given a section whose first paragraph appears long due to `[[wiki links]]` but is within the 250-character limit when link content is excluded, `checkSections` does not report an error.
+
+Links whose paths contain bracketed segments, such as `[companySlug]`, are excluded whole.
