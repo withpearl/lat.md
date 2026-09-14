@@ -41,6 +41,25 @@ npm install -g lat.md
 
 Then run `lat init` in the repo you want to use lat in.
 
+### Cast build (`withpearl/lat.md`, branch `cast/rollout`)
+
+This fork ships prebuilt CLI tarballs as [GitHub releases](https://github.com/withpearl/lat.md/releases) — performance fixes and a ~10x smaller search index that have not yet landed upstream. `npm install -g lat.md` installs the **upstream** package, not this build. Install a release by URL instead (no Rust or build step):
+
+```bash
+npm i -g https://github.com/withpearl/lat.md/releases/download/v0.12.2-cast.4/lat.md-0.12.2-cast.4.tgz
+lat --version   # 0.12.2-cast.4
+```
+
+Coming from `0.12.2-cast.3` or earlier, rebuild the search index once per repo. An existing index keeps working, but stays at its old, uncompressed size until you do — and one grown by months of incremental updates also misses some results a fresh build finds:
+
+```bash
+lat reindex --local
+```
+
+Keep `--local`: in a checkout not yet pinned to the offline model, a bare `lat reindex` rebuilds with a hosted model if an API key is configured.
+
+Revert with `npm i -g lat.md@latest`.
+
 ## How it works
 
 Run `lat init` to scaffold a `lat.md/` directory, then write markdown files describing your architecture, business logic, test specs — whatever matters. Link between sections using `[[file#Section#Subsection]]` syntax. Link to source code symbols with `[[src/auth.ts#validateToken]]`. Annotate source code with `// @lat: [[section-id]]` (or `# @lat: [[section-id]]` in Python) comments to tie implementation back to concepts.
