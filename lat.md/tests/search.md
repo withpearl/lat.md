@@ -138,6 +138,12 @@ Repeated passage owners collapse before ranks are assigned, and equal channel sc
 
 Adding blank lines changes source locations without re-embedding unchanged contextual inputs.
 
+### Updates moved sections without scanning
+
+Every per-section delete an update issues finds its rows through an index, including in an index built before that index existed. Inserting lines early in a large file changes every section after them.
+
+Deleting identifiers used to scan the whole table once per changed section: bringing a 16,000-section index up to date after one merge took 397 s instead of 35 s.
+
 ### Keeps incremental FTS scores equal to fresh indexes
 
 Section replacements, deletions, and deleting all sections produce the same lexical scores and hybrid ranks as fresh indexing, while line-only edits reuse every embedding.

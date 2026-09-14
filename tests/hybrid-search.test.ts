@@ -420,6 +420,46 @@ describe('hybrid search', () => {
       await f.db.close();
     }
   });
+  // @lat: [[tests/search#Hybrid Retrieval#Updates moved sections without scanning]]
+  it('looks up every per-section delete by index, including on indexes built before it existed', async () => {
+    const f = await indexed(
+      '# Guide\n\nneedle body\n\n## Child\n\nAPI_TOKEN value',
+    );
+    try {
+      await f.db.execute('DROP INDEX IF EXISTS identifiers_chunk');
+      await ensureSectionsSchema(f.db, 2);
+      writeFileSync(
+        join(f.lat, 'guide.md'),
+        '\n\n# Guide\n\nneedle body\n\n## Child\n\nAPI_TOKEN value',
+      );
+      const execute = vi.spyOn(f.db, 'execute');
+      await indexSections(f.lat, f.db, simple);
+      const deletes = execute.mock.calls
+        .map(([statement]) => statement)
+        .filter(
+          (s): s is { sql: string; args: unknown[] } =>
+            typeof s === 'object' && /^DELETE /.test(s.sql) && !!s.args?.length,
+        );
+      execute.mockRestore();
+      expect(deletes.some((s) => s.sql.includes('FROM identifiers'))).toBe(
+        true,
+      );
+      for (const s of deletes) {
+        const plan = (
+          await f.db.execute({
+            sql: `EXPLAIN QUERY PLAN ${s.sql}`,
+            args: s.args,
+          })
+        ).rows.map((r) => String(r.detail));
+        expect(
+          plan.filter((d) => d.startsWith('SCAN')),
+          s.sql,
+        ).toEqual([]);
+      }
+    } finally {
+      await f.db.close();
+    }
+  });
   // @lat: [[tests/search#Hybrid Retrieval#Publishes only successful generations]]
   it('preserves the active generation when replacement fails', async () => {
     const f = fixture('# Guide\n\nneedle text');

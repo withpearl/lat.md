@@ -144,6 +144,10 @@ export async function ensureSectionsSchema(
     'CREATE INDEX IF NOT EXISTS chunks_section ON chunks(section_id)',
     'CREATE TABLE IF NOT EXISTS lexical_chunks (id INTEGER PRIMARY KEY, body TEXT NOT NULL, heading TEXT NOT NULL, path TEXT NOT NULL)',
     'CREATE TABLE IF NOT EXISTS identifiers (token TEXT NOT NULL, chunk_id INTEGER NOT NULL, PRIMARY KEY(token,chunk_id))',
+    // Updates delete a changed section's identifiers by chunk. Without this each
+    // delete scans every identifier, and inserting lines early in a large file
+    // changes every section after them.
+    'CREATE INDEX IF NOT EXISTS identifiers_chunk ON identifiers(chunk_id)',
   ])
     await db.execute(sql);
   const oldIndex = (
