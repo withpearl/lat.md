@@ -82,6 +82,10 @@ export function chunkFile(
     }
     ancestors = ancestors.filter((s) => s.endLine >= block.endLine);
     const owner = ancestors.at(-1);
+    // Text before a file's first heading (a directory README's introduction)
+    // belongs to no section, and results are sections, so it forms no passage.
+    // An unowned block anywhere after a heading means the ranges are wrong.
+    if (!owner && sectionIndex === 0) continue;
     if (!owner)
       throw new Error(`No section owns ${file.path}:${block.startLine}`);
     const blocks = own.get(owner.id) ?? [];

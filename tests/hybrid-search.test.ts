@@ -305,6 +305,21 @@ describe('hybrid search', () => {
         .every((p) => p.sectionId === child.id),
     ).toBe(true);
   });
+  // @lat: [[tests/search#Hybrid Retrieval#Indexes text before a file's first heading]]
+  it('indexes a file whose text starts before its first heading', async () => {
+    const { db } = await indexed(
+      'An introduction before any heading, like a directory README.\n\n' +
+        '# Guide\n\nGuide body with a needle.\n',
+    );
+    const passages = (
+      await db.execute('SELECT section_id, body FROM chunks ORDER BY id')
+    ).rows.map((r) => [String(r.section_id), String(r.body)]);
+    expect(passages).toEqual([
+      ['lat.md/guide#Guide', 'Guide body with a needle.'],
+    ]);
+    const results = await searchSections(db, 'needle', simple, 5);
+    expect(results.map((r) => r.id)).toEqual(['lat.md/guide#Guide']);
+  });
   // @lat: [[tests/search#Hybrid Retrieval#Rejects local embedding truncation]]
   it('uses the real local tokenizer and rejects oversized embedding input', async () => {
     const engine = await createEmbedder({ model: minilm });

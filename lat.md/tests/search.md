@@ -110,6 +110,12 @@ Tests in [[tests/hybrid-search.test.ts]] verify passage ownership, token safety,
 
 Oversized prose, nested lists, code lines, table cells, and Unicode retain source coverage and fit the embedding model input budget without duplicating descendant content.
 
+### Indexes text before a file's first heading
+
+A file that opens with text before any heading, such as a directory README, still indexes. That text belongs to no section, so it forms no passage, and the sections after it are searchable as usual.
+
+It used to abort the whole index build with "No section owns", making search unusable for every file in the vault.
+
 ### Rejects local embedding truncation
 
 The real local tokenizer counts the full input and the WASM embedder rejects text beyond its limit, including tokenizer configurations containing an embedded truncation setting.
