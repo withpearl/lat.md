@@ -1153,6 +1153,26 @@ describe('folder-refs', () => {
     ).toEqual(['lat.md/specs/specs#Specs#Conventions']);
   });
 
+  // @lat: [[ref-resolution#Folder path ref resolves through its index]]
+  it('resolves refs that name the folder by its full path', async () => {
+    const sections = await loadAllSections(lat);
+    expect(
+      findSections(sections, 'lat.md/specs#Invoices#Void Invoice').map(
+        (m) => m.section.id,
+      ),
+    ).toEqual(['lat.md/specs/b#Specs#Invoices#Void Invoice']);
+    const { errors } = await checkCodeRefs(lat);
+    expect(errors.filter((e) => e.target.startsWith('lat.md/specs'))).toEqual(
+      [],
+    );
+    const code = await findRefs(
+      testCtx('folder-refs'),
+      'specs#Shared Area#Only In B',
+      'code',
+    );
+    expect(code.kind === 'found' && code.codeRefs).toHaveLength(1);
+  });
+
   // @lat: [[ref-resolution#Folder index ref refs finds code references]]
   it('findRefs follows folder refs from markdown and code', async () => {
     const code = await findRefs(

@@ -123,6 +123,10 @@ When more than one file in the directory holds the heading, the ref is ambiguous
 
 `@lat:` comments that resolve through a directory's index count toward `require-code-mention` for leaf sections in that directory's files.
 
+## Folder path ref resolves through its index
+
+A ref that names the directory by its full path (`[[lat.md/specs#Invoices#Void Invoice]]`), as a ref written before a file became a folder does, resolves through the directory's index file and then its other files, in code and markdown alike.
+
 ## Folder index ref findSections resolves
 
 `findSections` resolves a folder ref to the section in the directory's file, while a heading of the index file itself still wins.

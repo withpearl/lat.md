@@ -250,7 +250,7 @@ export function resolveRef(
   const lcFilePart = filePart.toLowerCase();
   const filePaths = fileIndex.has(lcFilePart)
     ? fileIndex.get(lcFilePart)!
-    : [filePart];
+    : [directoryIndexFile(filePart, fileIndex) ?? filePart];
 
   if (filePaths.length === 1) {
     const fp = filePaths[0];
@@ -339,6 +339,29 @@ export function indexedDirectory(file: string): string | null {
     file.slice(slash + 1).toLowerCase()
     ? dir
     : null;
+}
+
+/** Every file in the index, keyed by lowercase path. */
+const allFilesCache = new WeakMap<Map<string, string[]>, Map<string, string>>();
+
+/**
+ * The index file of a directory named by a ref's file part (`lat.md/tests` →
+ * `lat.md/tests/tests`), or null. A file split into a folder is referred to by
+ * its old path, which now names the folder.
+ */
+export function directoryIndexFile(
+  filePart: string,
+  fileIndex: Map<string, string[]>,
+): string | null {
+  let files = allFilesCache.get(fileIndex);
+  if (!files) {
+    files = new Map(
+      [...fileIndex.values()].flat().map((file) => [file.toLowerCase(), file]),
+    );
+    allFilesCache.set(fileIndex, files);
+  }
+  const name = filePart.slice(filePart.lastIndexOf('/') + 1);
+  return name ? (files.get(`${filePart}/${name}`.toLowerCase()) ?? null) : null;
 }
 
 /** Files directly inside each directory, keyed by lowercase directory path. */
@@ -506,7 +529,11 @@ export function findSections(
     const stemPaths = fileIndex.get(filePart.toLowerCase()) ?? [];
     // Also try filePart as a direct file path (for root-level files not in index)
     const allPaths =
-      stemPaths.length > 0 ? stemPaths : filePart ? [filePart] : [];
+      stemPaths.length > 0
+        ? stemPaths
+        : filePart
+          ? [directoryIndexFile(filePart, fileIndex) ?? filePart]
+          : [];
     for (const p of allPaths) {
       const s = sectionFor(p + rest);
       if (s) {
