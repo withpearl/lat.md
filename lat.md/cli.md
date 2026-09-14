@@ -18,7 +18,7 @@ Outputs a [[cli#Section Preview]] for each match.
 
 Usage: `lat locate <query>`
 
-Implementation: [[src/cli/locate.ts]], matching logic in [[src/lattice.ts#findSections]]
+Implementation: [[src/cli/locate.ts]], matching logic in [[src/lattice-model.ts#findSections]]
 
 ## section
 
@@ -30,14 +30,18 @@ Output:
 
 1. Section header with id and file location
 2. Section content blockquoted (`>`) from `startLine` through the end of the last descendant subsection
-3. **This section references** — all wiki link targets found within the section, including both lat.md section refs (with body descriptions) and source code refs (with file path and line range, e.g. `file.ts:10-25`, plus a 5-line snippet centered on the symbol)
-4. **Referenced by** — other sections in `lat.md/` that contain wiki links pointing to this section
-5. **Referenced by code** — source files containing `@lat:` comments that reference this section, each shown with file path, line number, and a 5-line snippet centered on the reference
+3. **This section references** — all wiki link targets found within the section or its descendants, including lat.md section refs with complete leading paragraphs, source code refs with line ranges and snippets, and external refs
+4. **Referenced by** — other sections in `lat.md/` that contain wiki links pointing to this section, shown with their complete leading paragraphs
+5. **Referenced by code** — source files containing `@lat:` comments that reference this section or any descendant, each shown with file path, line number, and a 5-line snippet centered on the reference
 6. **Navigation hints** — same footer as [[cli#search]], suggesting `lat section` and `lat search` as next steps
+
+Reference paragraphs rely on the 250-character section-summary invariant. As a fallback for documents that currently fail validation, output truncates them after 300 characters.
+
+Source snippet lines in outgoing-reference and code-backlink blocks use Markdown inline-code delimiters. Lines containing backticks receive a longer delimiter so template literals remain valid Markdown.
 
 Usage: `lat section <query>`
 
-Core logic in [[src/cli/section.ts#getSection]] (returns structured result), used by both the CLI command and [[cli#mcp]] `lat_section` tool. Incoming links and `@lat:` back-references come from a [[src/cli/section.ts#buildSectionIndex]] built per call — or built once and shared when a caller looks up several sections.
+Core logic in [[src/cli/section.ts#getSection]] (returns structured result), used by both the CLI command and [[cli#mcp]] `lat_section` tool.
 
 ## refs
 
@@ -65,11 +69,8 @@ Validation command group. Without a subcommand it runs every check against the
 discovered `lat.md/`; an explicit `-- <directory>` suffix validates any
 Markdown directory instead.
 
-A whole-vault run — `lat check` with no subcommand, and the Stop hook — reads and
-parses the vault once ([[src/cli/check.ts#loadVault]]) and shares it across the md,
-links, code-refs and sections phases; a phase run alone loads its own.
-
-Usage: `lat check [md|links|code-refs|index|sections] [-- <directory>]`
+Usage: `lat check [md|links|code-refs|index|sections] [-- <directory>]`; use
+`lat check --profile [-- <directory>]` to profile the full validation run.
 
 The separator is required. It keeps directory names distinct from subcommands:
 `lat check links` runs the relative-link subcommand against the discovered
@@ -82,17 +83,21 @@ relative to the containing project root and code references are scanned from
 that root. The full check skips the `lat init` version warning because the
 directory is not required to have lat setup metadata.
 
-Emits a stale-init warning before any errors so the user sees setup issues first. The init version check compares `INIT_VERSION` in [[src/init-version.ts]] against the version in `lat.md/.cache/lat_init.json` written by [[cli#init]]. If the total check took longer than one second and ripgrep is not installed, shows a tip suggesting the user install it for faster scanning. The first output line ("Scanned ...") includes the total elapsed time (e.g. "in 250ms" or "in 1.2s").
+Emits a stale-init warning before any errors so the user sees setup issues first. The init version check compares `INIT_VERSION` in [[src/init-version.ts]] against the version in `lat.md/.cache/lat_init.json` written by [[cli#init]]. If the total check took longer than one second and ripgrep is not installed, shows a tip suggesting the user install it for faster scanning. A successful full check ends with its total elapsed time, such as `All checks passed in 250ms`; file-extension counts are omitted because the validators perform different kinds of work.
 
-Implementation: [[src/cli/check.ts]]
+`--profile` adds a nested timing report for every validator and its major operations. Markdown and external-document timing explicitly report parser-module import durations on misses and zero-duration skipped-import events on hits; worker runs report one Markdown analyzer import per worker. Markdown and source timing also distinguish file reads, hashing, persistent parser-cache hits or misses, cache publication, and actual parser work. Repeated work is aggregated with call counts, average and maximum duration, and the slowest file or target so large-repository bottlenecks remain visible without one output line per file. Concurrent timings remain attributed to their initiating validator and may overlap within the total wall time.
+
+The full check runs its validators concurrently through one lazy command-scoped context backed by [[architecture-analysis#Project snapshot]]. Markdown files are read and parsed once; their AST-free facts and indexes are shared while syntax trees are discarded. Promise-backed code scanning, external resolution, and source-symbol checks coalesce in-flight work. Runtime state ends with the atomic command, while versioned AST-free parser entries remain as disposable input-hash caches.
+
+Implementation: [[src/cli/check.ts]], with check-specific inputs in [[src/cli/check-context.ts]] and shared Markdown analysis in [[src/project-analysis.ts]].
 
 ### md
 
-Validate that all [[parser#Wiki Links]] in the checked markdown files point to existing sections.
+Validate that every [[parser#Wiki Links|wiki link]] points to an existing section, an in-project file or directory, or a symbol in a supported source file.
 
 ### links
 
-Validate that ordinary markdown links in the checked files point to existing files, Markdown fragments use GitHub heading ids, and full or collapsed reference-style links have definitions. See [[markdown#Relative Links]] for exact rules.
+Validate that ordinary markdown links in the checked files point to existing files, Markdown fragments use GitHub heading ids, and all reference-style links have definitions. See [[markdown#Relative Links]] for exact rules.
 
 ### code-refs
 
@@ -177,6 +182,12 @@ Steps:
 7. **Version stamp + file hashes** — writes `INIT_VERSION` and SHA-256 hashes of all template-generated files to `lat.md/.cache/lat_init.json`. The version is also stamped when no agents are selected, because embedding setup has completed and must not be treated as fresh on the next run. On re-run, compares current file content against stored hashes: unmodified files are silently updated to the latest template; user-modified files trigger a Y/n prompt offering to overwrite with the latest template, declining suggests [[cli#gen]].
 8. **Next steps** — after all setup completes, prints agent-specific guidance for having the agent document the codebase. For Claude Code, shows a runnable `claude "..."` command. For IDE agents (Cursor, Copilot, Pi, OpenCode, Codex), shows the prompt to paste into agent chat. Both suggest running `lat check` when done.
 
+Initialization also adds `.lat-build` to the project-level `.gitignore`, keeping Lat's default static and Node-server outputs out of version control. Platform-specific output remains the project's responsibility.
+
+Completed interactive setup stores selected agent IDs under `init.agents` in the ignored `lat.md/config.local.yaml`. Subsequent checklists preselect those agents; unknown IDs are ignored. An explicitly empty selection is saved, while canceled setup and non-interactive runs leave preferences unchanged. Deselecting an agent does not uninstall its existing integration.
+
+[[src/cli/init-preferences.ts]] updates only this preference, preserving external-source overrides, unrelated settings, and YAML comments. Invalid YAML or preference shapes produce an error instead of overwriting the file. Existing setups without a saved selection start unchecked.
+
 At the very end, after all steps complete, init checks whether ripgrep (`rg`) is available. If missing, prints a tip suggesting the user install it for faster code scanning, with a link to the ripgrep installation guide.
 
 At the very start, before any steps, init prints the ASCII `lat.md` logo (cyan, matching the website) followed by "Checking latest version..." and awaits [[src/version.ts#fetchLatestVersion]] (3s timeout). If a newer version exists, prints an update notice so the user can upgrade before proceeding. If the fetch fails or the version matches, the message is cleared silently.
@@ -251,6 +262,10 @@ Generated agent instructions and `lat-md` skills direct project-specific documen
 
 The `AGENTS.md` and `lat-md` `SKILL.md` templates state that these generated files are owned by lat tooling and may be replaced by a later `lat init`. Agents must record project guidance in `lat.md/` rather than changing generated copies.
 
+The [shared authoring guidance](../templates/skill/SKILL.md) directs agents to bind implementation-owned symbols and defaults to validated source links instead of copying bare identifiers or literal values.
+
+Generated Markdown instructions obey Lat's local validation rules, so symlinked or shared instruction files remain valid even when they also live inside the project's graph directory.
+
 ### Marker-based append mode
 
 Shared files use `appendTemplateSection` to preserve user content outside lat's managed section.
@@ -291,7 +306,7 @@ Reads the hook input from stdin (Claude JSON with `user_prompt` or Codex JSON wi
 1. A directive to ALWAYS run `lat search` on the user's intent before starting work — even for seemingly straightforward tasks — because search may reveal critical design details, protocols, or constraints. Includes a hard gate: do not read files, write code, or run commands until search is done.
 2. A reminder that `lat.md/` must stay in sync with meaningful codebase state: update relevant current-state sections for behavior, architecture, tests, or planned-work changes, but do not use `lat.md/` as a journal/changelog or grow it for insignificant details.
 3. If the prompt contains `[[refs]]`, resolves them inline using [[src/cli/expand.ts#expandPrompt]]
-4. Runs [[src/cli/search.ts#runSearch]] on the user prompt in **read-only mode** (`buildIndex: false`) — it searches an existing index but never builds or updates one, so a user's first prompt in a fresh repo isn't blocked by a full local embed pass (building the index is `lat search` / [[cli#reindex]], and until then this returns no matches). Then, with the vault parsed once and shared with the search, one [[src/cli/section.ts#buildSectionIndex]] for all results and [[src/cli/section.ts#getSection]] + [[src/cli/section.ts#formatSectionOutput]] on each — the agent gets full section content with outgoing/incoming refs before it starts work. Gracefully degrades when nothing is indexed yet or the backend can't serve the index.
+4. Runs [[src/cli/search.ts#runSearch]] on the user prompt in **read-only mode** (`buildIndex: false`) — it searches an existing index but never builds or updates one, so a user's first prompt in a fresh repo isn't blocked by a full local embed pass (building the index is `lat search` / [[cli#reindex]], and until then this returns no matches). Then [[src/cli/section.ts#getSection]] + [[src/cli/section.ts#formatSectionOutput]] on each result — the agent gets full section content with outgoing/incoming refs before it starts work. Gracefully degrades when nothing is indexed yet or the backend can't serve the index.
 
 ### Stop
 
@@ -300,7 +315,7 @@ Conditionally continues Claude or Codex — only when something is actually wron
 1. **No `lat.md/` dir** — exit silently.
 2. **Run `lat check`** — always, on both first and second pass.
 3. **Second pass** (`stop_hook_active` true) — if check still fails, print warning to stderr (no block, loop stops). If check passes, exit silently.
-4. **First pass** — run `git diff HEAD --numstat`. Count `codeLines` (files matching [[src/source-parser.ts#SOURCE_EXTENSIONS]]) and `latMdLines`. Skip ratio check if `codeLines < 5` or `latMdLines >= 50` (enough doc work was clearly done). Otherwise round `latMdLines` up to 1 (if nonzero) and flag `needsSync` when `latMdLines < codeLines * 5%`.
+4. **First pass** — measure churn via [[src/cli/hook.ts#analyzeDiff]]: project-relative `git diff HEAD --numstat --relative -- .` covers tracked changes, while NUL-delimited `git ls-files --others --exclude-standard -z -- .` discovers untracked files and respects Git ignore rules. Both scans stay within the discovered Lat project when it is nested in a larger Git worktree. The hook counts regular files under `lat.md/` plus code files matching [[src/source-formats.ts#SOURCE_FILE_EXTENSIONS]]; it classifies untracked paths before reading them, so unrelated files are skipped. This makes a freshly scaffolded, never-committed `lat.md/` visible. Outside a Git worktree, diff analysis contributes zero churn by design: Git is optional, so validation still runs but the sync reminder is disabled. Skip the ratio check if `codeLines < 5` or `latMdLines >= 50`; otherwise flag `needsSync` when `latMdLines < codeLines * 5%`.
 5. **Decision** — both pass: exit silently, clean output. Check failed + needs sync: block ("update relevant current-state `lat.md/` sections if needed, then run `lat check` until it passes"). Check failed only: block ("run `lat check` until it passes"). Needs sync only: block with explicit context ("not updated" when 0 lat.md lines, "may not be fully in sync (N lines)" when some changes exist but below ratio) and a reminder not to add journal/changelog noise.
 
 ### cursor stop
@@ -330,14 +345,17 @@ Implementation: [[src/mcp/server.ts]]
 
 ## search
 
-Semantic search across `lat.md` sections using vector embeddings. Works **offline by default** — no
-API key required.
+Hybrid lexical and semantic search returns ranked sections with matching source passages. Local embeddings work offline; hosted models remain available through the existing backend selection rules.
 
-Usage: `lat search [query] [--limit=5]`
+Usage: `lat search [query] [--limit <n>] [--min-similarity <score>] [--preview passage|intro|both] [--debug]`.
 
-Query is optional — `lat search` with no query just builds the index on first use. `lat search` only reads; rebuilding is [[cli#reindex]]. Results include a navigation hint footer suggesting `lat locate`, `lat refs`, and `lat search` for further exploration — this makes the tools self-documenting so agents discover them organically.
+With no query, search builds or updates the index. With a query it checks document freshness before retrieval. Unchanged projects reuse their published index without embedding or copying a generation. Read-only prompt hooks never build or migrate.
 
-Core search logic in [[src/cli/search.ts#runSearch]] (returns matched sections), used by both the CLI command and [[cli#mcp]] `lat_search` tool. The vault is parsed once per search and shared by the index pass and hit resolution; a caller that already holds a parse (the prompt hook) passes it as `opts.sections`. Indexing/storage internals are in `src/search/`; all embedding generation lives in the `@lat.md/embed` package (see [[cli#search#Embeddings]]).
+The semantic minimum defaults to 0.20 ([[src/search/search.ts#DEFAULT_MIN_SIMILARITY]]). Lexical evidence qualifies independently. The limit defaults to five ([[src/search/search.ts#DEFAULT_SEARCH_LIMIT]]); the UI requests ten. Empty queries return no matches and oversized embedding queries fail explicitly.
+
+Passage previews are the default. `--preview intro` restores introduction previews; `both` displays both without changing ranking. `--debug` includes hybrid rank score, channel ranks and contributions, cosine similarity, and candidate-budget diagnostics. Hybrid scores are not confidence values.
+
+CLI and MCP share [[src/cli/search.ts#runSearch]]. The MCP argument is `minSimilarity`; the old threshold option is removed. [[src/search/query.ts#openIndexedSearchSession]] owns one published database generation and embedder for repeated runtime queries.
 
 ### Backend selection
 
@@ -375,57 +393,23 @@ Implementation: [[src/search/embedder.ts]], [[src/config.ts]]
 
 ### Embeddings
 
-All embedding generation is isolated in the `@lat.md/embed` package, exposed through one
-[[packages/embed/src/index.ts#createEmbedder]] entry point returning an `Embedder`
-(`{ name, dimensions, embed() }`). Two backends:
-
-- **local** — a candle (Rust) BERT engine compiled to WebAssembly ([[packages/embed/src/local.ts#createLocalEmbedder]]), driven by a `ModelManifest` from a weights package (`@lat.md/embed-minilm-fp16`, fp16 weights up-cast to fp32 at load). Pure WASM, no native binaries; masked-mean pooling + L2 normalize, matching `sentence-transformers`. Texts are embedded one at a time (the engine is single-threaded with no batch speedup, and padding a batch to its longest item wastes work); large jobs fan out across `worker_threads` (one engine per CPU, [[packages/embed/src/worker.ts]]) while small jobs run inline.
-- **remote** — direct `fetch()` to an OpenAI-compatible `/v1/embeddings` endpoint, batching up to 2048 texts per request ([[packages/embed/src/remote.ts#detectProvider]]).
+[[rag-architecture#Embedding backends]] defines the shared local and hosted embedder contract, tokenizer limits, and model selection. This command uses that implementation for indexing and query vectors.
 
 ### Storage
 
-Uses `@libsql/client` in local file mode. Under Node, file URLs load the native `libsql` platform binding, so database handles follow native OS lifetime and locking rules.
-
-Vector search is built into libsql via `F32_BLOB` column type, `libsql_vector_idx` for indexing, and `vector_top_k()` for KNN queries. Returned candidates retain their exact cosine similarity as a score for downstream consumers.
-
-The DiskANN index is created with `compress_neighbors=float1bit` and `search_l=1600` ([[src/search/db.ts#ensureSectionsSchema]]). Each graph node stores a copy of every neighbour's vector; at float32 those copies were ~94% of the file (a 7 MB corpus built a 1.3 GB index), at one bit per dimension each node block is ~15x smaller. Compression only steers traversal — every visited candidate is ranked by its full-precision vector — and libSQL's default degree rises (51 → 60 neighbours at 384 dims) because edges got cheaper.
-
-One-bit distances steer less precisely, so the search beam is widened from libSQL's default 200 candidates. Measured on a 16k-section corpus against exact search over 568 real queries: float1bit alone dropped recall@5 from 99.93% to 98.38% and returned different results run to run; at `search_l=1600` recall@5 is 100% and results are stable, for ~0.15 s per query. A wider graph (`insert_l`) did not help.
-
-Both settings are fixed at `CREATE INDEX`. An existing index is never converted in place (`CREATE INDEX IF NOT EXISTS`); it keeps its layout until [[cli#reindex]] recreates it.
-
-Single `sections` table holds metadata, content, content hash, and the embedding vector. No separate vector table needed. The `meta` table records the embedding model + dimensions the index was built with ([[src/search/db.ts#getStoredModel]], e.g. `local:minilm-l6-v2:384` or `openai:1536`). This record is authoritative for [[cli#search#Backend selection]] — vectors from different models are not comparable, so a model change never silently rebuilds; [[cli#reindex]] drops (via [[src/search/db.ts#dropSections]]) and rebuilds explicitly.
-
-The database is stored at `lat.md/.cache/vectors.db` and should not be committed (included in `.gitignore` template).
-
-Implementation: [[src/search/db.ts]]
+[[rag-architecture#Storage and migration]] defines the embedded database, published generations, writer locking, and legacy migration used by search.
 
 ### Indexing
 
-Sections come from `loadAllSections()` + `flattenSections()`. Each file is read once ([[src/search/index.ts#loadFileLines]]) and each section's raw markdown (`startLine`–`endLine`, not just `firstParagraph`) is sliced from it for richer semantic signal.
-
-Never read per section: that is O(sections × file size), and a 3.5 MB file holding 12k sections cost ~95 s per search before the query even ran.
-
-Content freshness is tracked via SHA-256 hashes. On each run:
-
-1. Parse all sections, compute hashes
-2. Compare against stored hashes in the DB
-3. Only re-embed new or changed sections (saves API cost / local compute)
-4. Delete DB rows for sections that no longer exist
-
-On first run, automatically indexes all sections. A full rebuild is [[cli#reindex]].
-
-Implementation: [[src/search/index.ts]]
+[[rag-architecture#Coverage and ownership]], [[rag-architecture#Chunk boundaries]], and [[rag-architecture#Embedding reuse after edits]] define passage construction and vector reuse. Ordinary search updates the index; explicit reindexing rebuilds it.
 
 ### Vector Search
 
-Embeds the user's query via the active embedder, then runs a `vector_top_k()` KNN query joined back to the sections table.
-
-Implementation: [[src/search/search.ts]]
+[[rag-architecture#Lexical analysis]] and [[rag-architecture#Candidate retrieval and fusion]] define the shared retrieval algorithm. [[rag-architecture#Result contract]] describes scores and evidence returned to command, MCP, and browser consumers.
 
 ## reindex
 
-Rebuilds the embedding index — the single write/rebuild path (`lat search` only reads). Usage:
+Explicitly rebuilds the complete hybrid index; ordinary search also performs incremental indexing. Usage:
 `lat reindex [--local] [--remote] [--yes]`.
 
 Backend selection honors the **durable per-repo preference**: a repo pinned to local rebuilds local

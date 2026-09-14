@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execSync, spawnSync } from 'node:child_process';
+import { globSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   findLatticeDir,
@@ -20,7 +21,7 @@ import {
   checkIndex,
   checkSections,
 } from '../src/cli/check.js';
-import { scanCodeRefs } from '../src/code-refs.js';
+import { discoverSourceFiles, scanCodeRefs } from '../src/code-refs.js';
 import { findRefs } from '../src/cli/refs.js';
 import { getSection, formatSectionOutput } from '../src/cli/section.js';
 
@@ -36,6 +37,12 @@ const cliPath = join(
   'cli',
   'index.js',
 );
+
+afterAll(() => {
+  for (const cache of globSync('**/.cache', { cwd: casesDir })) {
+    rmSync(join(casesDir, cache), { recursive: true, force: true });
+  }
+});
 
 function runCli(
   caseName: string,
@@ -62,6 +69,13 @@ function latDir(name: string): string {
   return join(casesDir, name, 'lat.md');
 }
 
+function clearParsedCache(name: string, target = 'lat.md'): void {
+  rmSync(join(caseDir(name), target, '.cache', 'parsed'), {
+    recursive: true,
+    force: true,
+  });
+}
+
 function testCtx(name: string): CmdContext {
   return {
     latDir: latDir(name),
@@ -77,23 +91,70 @@ describe('cli command surface', () => {
     expect(ui.exitCode).toBe(0);
     expect(ui.stdout).toContain('Usage: lat ui');
     expect(ui.stdout).toContain('build');
+    expect(ui.stdout).toContain('run');
     expect(ui.stdout).toContain('--logo-text <text>');
+    expect(ui.stdout).toContain('--no-git');
     expect(ui.stdout).toContain('--port <number>');
+
+    const run = runCli('basic-project', ['ui', 'run', '--help']);
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toContain('Usage: lat ui run');
+    expect(run.stdout).toContain('--no-git');
 
     const build = runCli('basic-project', ['ui', 'build', '--help']);
     expect(build.exitCode).toBe(0);
     expect(build.stdout).toContain('Usage: lat ui build');
-    expect(build.stdout).toContain('--logo-text <text>');
+    expect(build.stdout).toContain('static');
+    expect(build.stdout).toContain('server');
+
+    const staticBuild = runCli('basic-project', [
+      'ui',
+      'build',
+      'static',
+      '--help',
+    ]);
+    expect(staticBuild.exitCode).toBe(0);
+    expect(staticBuild.stdout).toContain('Usage: lat ui build static');
+    expect(staticBuild.stdout).toContain('.lat-build/static');
+    expect(staticBuild.stdout).toContain('--force');
+    expect(staticBuild.stdout).toContain('--logo-text <text>');
+
+    const serverBuild = runCli('basic-project', [
+      'ui',
+      'build',
+      'server',
+      '--help',
+    ]);
+    expect(serverBuild.exitCode).toBe(0);
+    expect(serverBuild.stdout).toContain('Usage: lat ui build server');
+    expect(serverBuild.stdout).toContain('.lat-build/server');
+    expect(serverBuild.stdout).toContain('.vercel/output');
+    expect(serverBuild.stdout).toContain('--force');
+    expect(serverBuild.stdout).toContain('--logo-text <text>');
+    expect(serverBuild.stdout).toContain('--target <target>');
+    expect(serverBuild.stdout).toContain('node or vercel');
+
+    const invalidTarget = runCli('basic-project', [
+      'ui',
+      'build',
+      'server',
+      '--target',
+      'edge',
+    ]);
+    expect(invalidTarget.exitCode).toBe(1);
+    expect(invalidTarget.stderr).toContain('target must be node or vercel');
 
     const existingOutput = runCli('basic-project', [
       'ui',
       'build',
+      'static',
       'lat.md',
       '--logo-text',
       'Project Atlas',
     ]);
     expect(existingOutput.exitCode).toBe(1);
     expect(existingOutput.stderr).toContain('Static UI output already exists:');
+    expect(existingOutput.stderr).toContain('Use --force to replace it.');
 
     const invalidPort = runCli('basic-project', ['ui', '--port', '0']);
     expect(invalidPort.exitCode).toBe(1);
@@ -104,6 +165,30 @@ describe('cli command surface', () => {
     const view = runCli('basic-project', ['view']);
     expect(view.exitCode).toBe(1);
     expect(view.stderr).toContain("unknown command 'view'");
+  });
+
+  it('exposes search score controls', () => {
+    const search = runCli('basic-project', ['search', '--help']);
+    expect(search.exitCode).toBe(0);
+    expect(search.stdout).toContain('--debug');
+    expect(search.stdout).toContain(
+      'show retrieval scores and candidate diagnostics',
+    );
+    expect(search.stdout).toContain('--min-similarity <score>');
+    expect(search.stdout).toContain('default: 0.2');
+
+    for (const threshold of ['-0.1', '1.1']) {
+      const invalidThreshold = runCli('basic-project', [
+        'search',
+        'query',
+        '--min-similarity',
+        threshold,
+      ]);
+      expect(invalidThreshold.exitCode).toBe(1);
+      expect(invalidThreshold.stderr).toContain(
+        'min-similarity must be a number from 0 to 1',
+      );
+    }
   });
 });
 
@@ -337,9 +422,8 @@ describe('basic-project', () => {
 
   // @lat: [[check-md#Passes with valid links]]
   it('check md passes with valid links', async () => {
-    const { errors, files } = await checkMd(lat);
+    const { errors } = await checkMd(lat);
     expect(errors).toHaveLength(0);
-    expect(files).toEqual({ '.md': 2 });
   });
 });
 
@@ -440,12 +524,41 @@ describe('error-md-links', () => {
       'lat.md/a.md:12: undefined link reference',
       'lat.md/a.md:13: undefined image reference',
       'lat.md/a.md:14: undefined link reference',
-      'lat.md/a.md:15: broken link (#Alpha)',
-      'lat.md/a.md:20: broken link (./does-not-exist-def.md)',
+      'lat.md/a.md:15: undefined shortcut link reference',
+      'lat.md/a.md:16: undefined shortcut image reference',
+      'lat.md/a.md:17: broken link (#Alpha)',
+      'lat.md/a.md:22: broken link (./does-not-exist-def.md)',
+      'lat.md/a.md:24: malformed reference definition ([packed one]:)',
+      'lat.md/a.md:24: malformed reference definition ([packed two]:)',
     ]) {
       expect(output).toContain(expected);
     }
-    expect(output).toContain('14 errors found');
+    expect(output).toContain('18 errors found');
+  });
+
+  // @lat: [[check-links#Rejects undefined shortcut references]]
+  it('lat check links explains how to fix undefined shortcut references', () => {
+    const { stderr: output, exitCode } = runCli('error-md-links', [
+      'check',
+      'links',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(output).toContain(
+      'undefined shortcut link reference ([undefined shortcut]) — ' +
+        'add a definition "[undefined shortcut]: <destination>" to make it a link, ' +
+        'or escape the opening bracket as "\\[undefined shortcut]" to keep it as literal text',
+    );
+    expect(output).toContain(
+      'undefined shortcut image reference (![undefined shortcut image]) — ' +
+        'add a definition "[undefined shortcut image]: <destination>" to make it an image, ' +
+        'or escape the opening bracket as "!\\[undefined shortcut image]" to keep it as literal text',
+    );
+    expect(output).toContain(
+      'malformed reference definition ([packed one]:) — ' +
+        'write it as "[packed one]: <destination>" on its own line, ' +
+        'or escape the opening bracket as "\\[packed one]:" to keep it as literal text',
+    );
   });
 
   // @lat: [[check-links#Rejects backslash path separators]]
@@ -502,7 +615,7 @@ describe('error-md-links', () => {
     expect(exitCode).toBe(1);
     expect(stdout).toBe('');
     expect(output).toContain('lat.md/a.md:5: broken link (does-not-exist.md)');
-    expect(output).toContain('14 errors found');
+    expect(output).toContain('18 errors found');
     expect(output).not.toContain('missing index file');
   });
 });
@@ -538,6 +651,104 @@ describe('valid-md-links', () => {
 // --- headless check targets ---
 
 describe('headless-check', () => {
+  // @lat: [[tests/check-headless#Profiles validation work]]
+  it('reports detailed validation timings only with --profile', () => {
+    clearParsedCache('headless-check', 'links');
+    const regular = runCli('headless-check', ['check', '--', 'links']);
+    clearParsedCache('headless-check', 'links');
+    const profiled = runCli('headless-check', [
+      'check',
+      '--profile',
+      '--',
+      'links',
+    ]);
+
+    expect(regular.stdout).not.toContain('Profile (');
+    expect(profiled.exitCode).toBe(0);
+    expect(profiled.stderr).toBe('');
+    for (const operation of [
+      'check Markdown wiki links',
+      'parse Markdown AST',
+      'import Markdown analyzer',
+      'hash Markdown file',
+      'parsed Markdown cache miss',
+      'extract wiki links',
+      'check relative Markdown links',
+      'check @lat code references',
+      'scan project files for @lat references',
+      'check directory indexes',
+      'check section structure',
+      'extract Markdown sections',
+    ]) {
+      expect(profiled.stdout).toContain(operation);
+    }
+    expect(profiled.stdout).toMatch(/across \d+ calls/);
+    expect(profiled.stdout).toContain('All checks passed');
+  });
+
+  // @lat: [[tests/check-headless#Reports concise completion timing]]
+  it('reports total time without misleading file-extension counts', () => {
+    const result = runCli('headless-check', ['check', '--', 'links']);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toMatch(
+      /^All checks passed in (?:\d+ms|\d+\.\ds)\n$/,
+    );
+    expect(result.stdout).not.toContain('Scanned');
+  });
+
+  // @lat: [[tests/check-headless#Reuses check data across validators]]
+  it('parses each Markdown file once across the full check', () => {
+    clearParsedCache('headless-check', 'links');
+    const { stdout, stderr, exitCode } = runCli('headless-check', [
+      'check',
+      '--profile',
+      '--',
+      'links',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe('');
+    expect(stdout.match(/parse Markdown AST:/g)).toHaveLength(1);
+    expect(stdout).toMatch(/parse Markdown AST: .* across 2 calls/);
+  });
+
+  // @lat: [[tests/check-headless#Profiles persistent parser cache hits]]
+  it('reports cache hits without parser work on a warm check', () => {
+    clearParsedCache('headless-check', 'links');
+    expect(runCli('headless-check', ['check', '--', 'links']).exitCode).toBe(0);
+    const { stdout, stderr, exitCode } = runCli('headless-check', [
+      'check',
+      '--profile',
+      '--',
+      'links',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe('');
+    expect(stdout).toMatch(/parsed Markdown cache hit: .* across 2 calls/);
+    expect(stdout).toContain('skip Markdown analyzer import');
+    expect(stdout).not.toContain('import Markdown analyzer');
+    expect(stdout).not.toContain('parse Markdown AST');
+  });
+
+  // @lat: [[tests/check-headless#Profiles persistent source cache hits]]
+  it('reports source cache hits without tree-sitter work on a warm check', () => {
+    clearParsedCache('source-ref-ts-valid');
+    const cold = runCli('source-ref-ts-valid', ['check', '--profile']);
+    expect(cold.exitCode).toBe(0);
+    expect(cold.stderr).toBe('');
+    expect(cold.stdout).toContain('parsed source cache miss');
+    expect(cold.stdout).toContain('parse source symbols');
+
+    const warm = runCli('source-ref-ts-valid', ['check', '--profile']);
+    expect(warm.exitCode).toBe(0);
+    expect(warm.stderr).toBe('');
+    expect(warm.stdout).toContain('parsed source cache hit');
+    expect(warm.stdout).not.toContain('parse source symbols');
+  });
+
   // @lat: [[tests/check-headless#Separator disambiguates directory names]]
   it('treats a name after -- as a directory, not a subcommand', () => {
     const full = runCli('headless-check', ['check', '--', 'links']);
@@ -614,13 +825,10 @@ describe('error-headless-check', () => {
 describe('error-dangling-code-ref', () => {
   // @lat: [[check-code-refs#Detects dangling code ref]]
   it('check code-refs detects @lat pointing to nonexistent section', async () => {
-    const { errors, files } = await checkCodeRefs(
-      latDir('error-dangling-code-ref'),
-    );
+    const { errors } = await checkCodeRefs(latDir('error-dangling-code-ref'));
     const dangling = errors.filter((e) => e.target === 'Alpha#Nonexistent');
     expect(dangling).toHaveLength(1);
     expect(dangling[0].message).toContain('no matching section found');
-    expect(files).toEqual({ '.ts': 1 });
   });
 });
 
@@ -644,11 +852,46 @@ describe('python-code-ref', () => {
   });
 
   it('detects dangling @lat ref in Python file', async () => {
-    const { errors, files } = await checkCodeRefs(latDir('python-code-ref'));
+    const { errors } = await checkCodeRefs(latDir('python-code-ref'));
     expect(errors).toHaveLength(1);
     expect(errors[0].target).toBe('Specs#Nonexistent');
     expect(errors[0].message).toContain('no matching section found');
-    expect(files).toEqual({ '.py': 1 });
+  });
+});
+
+// --- dart-code-ref ---
+
+describe('dart-code-ref', () => {
+  // @lat: [[tests/check-code-refs#Scans Dart references around annotations]]
+  it('scans Dart // references including between annotations', async () => {
+    const { refs } = await scanCodeRefs(caseDir('dart-code-ref'));
+    expect(refs).toHaveLength(3);
+
+    expect(refs[0]).toMatchObject({
+      target: 'Specs#Feature A',
+      file: 'app.dart',
+      line: 1,
+    });
+    expect(refs[1]).toMatchObject({
+      target: 'Specs#Feature B',
+      file: 'app.dart',
+      line: 5,
+    });
+    expect(refs[2]).toMatchObject({
+      target: 'Specs#Nonexistent',
+      file: 'app.dart',
+      line: 8,
+    });
+  });
+
+  it('reports a dangling reference from a Dart file', async () => {
+    const { errors } = await checkCodeRefs(latDir('dart-code-ref'));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      target: 'Specs#Nonexistent',
+      line: 8,
+    });
+    expect(errors[0].message).toContain('no matching section found');
   });
 });
 
@@ -656,7 +899,11 @@ describe('python-code-ref', () => {
 
 describe('gitignore-filtering', () => {
   it('skips .gitignore-d dirs and .git/', async () => {
-    const { refs, files } = await scanCodeRefs(caseDir('gitignore-filtering'));
+    const root = caseDir('gitignore-filtering');
+    const [{ refs }, files] = await Promise.all([
+      scanCodeRefs(root),
+      discoverSourceFiles(root),
+    ]);
     // build/ and vendor/ are gitignored; .git/ is always excluded
     expect(refs).toHaveLength(1);
     expect(refs[0].file).toContain('src/app.ts');
@@ -819,6 +1066,12 @@ describe('short-ref', () => {
     expect(matches).toHaveLength(1);
     expect(matches[0].section.id).toBe('lat.md/guides/setup#Setup#Install');
     expect(matches[0].reason).toMatch(/file stem expanded/);
+
+    const explicitExtension = findSections(sections, 'setup.md#Install');
+    expect(explicitExtension).toHaveLength(1);
+    expect(explicitExtension[0].section.id).toBe(
+      'lat.md/guides/setup#Setup#Install',
+    );
   });
 
   // @lat: [[locate#File stem fuzzy does not over-match]]
@@ -940,7 +1193,7 @@ describe('error-bare-heading-ref', () => {
     const { errors } = await checkMd(lat);
     const bare = errors.find((e) => e.target === 'Installation');
     expect(bare).toBeDefined();
-    expect(bare!.message).toContain('no matching section found');
+    expect(bare!.message).toContain('not found');
   });
 
   // @lat: [[ref-resolution#Local section syntax in md is error]]
@@ -1128,6 +1381,22 @@ describe('source-ref-go-valid', () => {
   });
 });
 
+describe('source-ref-dart-valid', () => {
+  // @lat: [[tests/check-md#Passes with valid links#Passes with Dart source symbol links]]
+  it('resolves Dart declarations and nested members without errors', async () => {
+    const { errors } = await checkMd(latDir('source-ref-dart-valid'));
+    expect(errors).toHaveLength(0);
+  });
+});
+
+describe('source-ref-java-valid', () => {
+  // @lat: [[tests/check-md#Passes with valid links#Passes with Java source symbol links]]
+  it('resolves Java types and nested members without errors', async () => {
+    const { errors } = await checkMd(latDir('source-ref-java-valid'));
+    expect(errors).toHaveLength(0);
+  });
+});
+
 describe('error-source-ref-rs-missing', () => {
   it('check md reports all missing Rust symbols', async () => {
     const { errors } = await checkMd(latDir('error-source-ref-rs-missing'));
@@ -1179,6 +1448,48 @@ describe('error-source-ref-go-missing', () => {
     expect(method.message).toContain(
       'symbol "Greeter#MissingMethod" not found',
     );
+  });
+});
+
+describe('error-source-ref-dart-missing', () => {
+  it('check md reports all missing Dart symbols', async () => {
+    const { errors } = await checkMd(latDir('error-source-ref-dart-missing'));
+    expect(errors).toHaveLength(4);
+
+    const byTarget = new Map(errors.map((error) => [error.target, error]));
+    expect(byTarget.get('src/app.dart#nonexistent')?.message).toContain(
+      'symbol "nonexistent" not found',
+    );
+    expect(byTarget.get('src/app.dart#MissingClass')?.message).toContain(
+      'symbol "MissingClass" not found',
+    );
+    expect(byTarget.get('src/app.dart#missingName')?.message).toContain(
+      'symbol "missingName" not found',
+    );
+    expect(
+      byTarget.get('src/app.dart#Greeter#missingMethod')?.message,
+    ).toContain('symbol "Greeter#missingMethod" not found');
+  });
+});
+
+describe('error-source-ref-java-missing', () => {
+  it('check md reports all missing Java symbols', async () => {
+    const { errors } = await checkMd(latDir('error-source-ref-java-missing'));
+    expect(errors).toHaveLength(4);
+
+    const byTarget = new Map(errors.map((error) => [error.target, error]));
+    expect(byTarget.get('src/Greeter.java#nonexistent')?.message).toContain(
+      'symbol "nonexistent" not found',
+    );
+    expect(byTarget.get('src/Greeter.java#MissingClass')?.message).toContain(
+      'symbol "MissingClass" not found',
+    );
+    expect(byTarget.get('src/Greeter.java#MISSING_CONST')?.message).toContain(
+      'symbol "MISSING_CONST" not found',
+    );
+    expect(
+      byTarget.get('src/Greeter.java#Greeter#missingMethod')?.message,
+    ).toContain('symbol "Greeter#missingMethod" not found');
   });
 });
 
@@ -1237,6 +1548,59 @@ describe('error-source-ref-unsupported-ext', () => {
     expect(errors[0].message).toContain('.ts');
     expect(errors[0].message).toContain('.rs');
     expect(errors[0].message).toContain('.go');
+    expect(errors[0].message).toContain('.dart');
+  });
+});
+
+describe('repository-path-refs', () => {
+  const lat = latDir('repository-path-refs');
+
+  // @lat: [[check-md#Passes with valid links#Accepts repository path links]]
+  it('accepts existing repository files and directories without fragments', async () => {
+    const { errors } = await checkMd(lat);
+    const invalid = new Set(errors.map((error) => error.target));
+    for (const target of [
+      'schema.sql',
+      'CHANGELOG',
+      'README.md',
+      'assets',
+      'assets/',
+      'generated.ts',
+      '.',
+      'src/app.ts',
+      String.raw`src\app.ts`,
+      'src/app.ts#run',
+    ]) {
+      expect(invalid).not.toContain(target);
+    }
+  });
+
+  // @lat: [[check-md#Detects broken links#Rejects invalid repository path links]]
+  it('rejects missing, escaping, and unsupported-fragment path targets', async () => {
+    const { errors } = await checkMd(lat);
+    expect(errors).toHaveLength(8);
+    const byTarget = new Map(errors.map((error) => [error.target, error]));
+
+    expect(byTarget.get('missing.sql')?.message).toContain('not found');
+    expect(byTarget.get('missing-dir/')?.message).toContain('not found');
+    expect(byTarget.get('schema.sql#users')?.message).toContain(
+      'unsupported file extension ".sql"',
+    );
+    expect(byTarget.get('CHANGELOG#entry')?.message).toContain(
+      'unsupported file extension "(none)"',
+    );
+    expect(byTarget.get('assets#entry')?.message).toContain(
+      'directory "assets" cannot have a fragment',
+    );
+    expect(byTarget.get('assets.v1#entry')?.message).toContain(
+      'directory "assets.v1" cannot have a fragment',
+    );
+    expect(byTarget.get('generated.ts#entry')?.message).toContain(
+      'directory "generated.ts" cannot have a fragment',
+    );
+    expect(byTarget.get('../source-ref-ts-valid')?.message).toContain(
+      'must stay within the project root',
+    );
   });
 });
 
@@ -1399,6 +1763,46 @@ describe('getSection', () => {
     expect(output).toContain('lat.md/links#Links');
   });
 
+  // @lat: [[tests/section#Parent section aggregates descendant references]]
+  it('aggregates outgoing refs and code backlinks from descendants', async () => {
+    const ctx = testCtx('section-nested');
+    const result = await getSection(ctx, 'guide#Guide');
+    expect(result.kind).toBe('found');
+    if (result.kind !== 'found') return;
+
+    expect(result.outgoingRefs.map((ref) => ref.resolved.id)).toEqual([
+      'lat.md/target#Target',
+    ]);
+    expect(result.outgoingSourceRefs.map((ref) => ref.target)).toEqual([
+      'src/example.ts#child',
+    ]);
+    expect(result.codeRefs.map((ref) => ref.line)).toEqual([1, 4]);
+
+    const output = stripAnsi(formatSectionOutput(ctx, result));
+    expect(output).toContain('This section references:');
+    expect(output).toContain('Referenced by code:');
+    expect(output).toContain('@lat: [[guide#Guide#Child]]');
+    expect(output).toContain('@lat: [[guide#Guide#Child#Grandchild]]');
+  });
+
+  // @lat: [[tests/section#Reference summaries preserve leading paragraphs]]
+  it('renders full reference summaries with a malformed-content safety cap', async () => {
+    const ctx = testCtx('section-nested');
+    const result = await getSection(ctx, 'guide#Guide');
+    expect(result.kind).toBe('found');
+    if (result.kind !== 'found') return;
+
+    const completeOutput = stripAnsi(formatSectionOutput(ctx, result));
+    expect(completeOutput).toContain('outgoing summary ending.');
+    expect(completeOutput).toContain('incoming summary ending.');
+
+    result.outgoingRefs[0].resolved.firstParagraph =
+      'x'.repeat(300) + 'content beyond the safety limit';
+    const cappedOutput = stripAnsi(formatSectionOutput(ctx, result));
+    expect(cappedOutput).toContain('x'.repeat(300) + '...');
+    expect(cappedOutput).not.toContain('content beyond the safety limit');
+  });
+
   // @lat: [[tests/section#Source refs include line range]]
   it('TS: outgoingSourceRefs include endLine for function, class, type, interface', async () => {
     const ctx = testCtx('source-ref-ts-valid');
@@ -1513,6 +1917,63 @@ describe('getSection', () => {
     expect(ref('src/app.go#Greeting')).toMatchObject({ line: 21, endLine: 23 });
   });
 
+  it('Dart: outgoingSourceRefs include complete annotated and member ranges', async () => {
+    const ctx = testCtx('source-ref-dart-valid');
+    const result = await getSection(ctx, 'lat.md/docs#Docs');
+    expect(result.kind).toBe('found');
+    if (result.kind !== 'found') return;
+    const ref = (target: string) =>
+      result.outgoingSourceRefs.find(
+        (reference) => reference.target === target,
+      );
+
+    expect(ref('src/app.dart#greet')).toMatchObject({ line: 7, endLine: 10 });
+    expect(ref('src/app.dart#Greeter')).toMatchObject({
+      line: 12,
+      endLine: 26,
+    });
+    expect(ref('src/app.dart#Greeter#greet')).toMatchObject({
+      line: 19,
+      endLine: 21,
+    });
+    expect(ref('src/app.dart#Greeting#wave')).toMatchObject({
+      line: 29,
+      endLine: 29,
+    });
+    expect(ref('src/app.dart#UserId#format')).toMatchObject({
+      line: 44,
+      endLine: 44,
+    });
+  });
+
+  it('Java: outgoingSourceRefs include annotated types and member ranges', async () => {
+    const ctx = testCtx('source-ref-java-valid');
+    const result = await getSection(ctx, 'lat.md/docs#Docs');
+    expect(result.kind).toBe('found');
+    if (result.kind !== 'found') return;
+    const ref = (target: string) =>
+      result.outgoingSourceRefs.find(
+        (reference) => reference.target === target,
+      );
+
+    expect(ref('src/Greeter.java#Greeter')).toMatchObject({
+      line: 3,
+      endLine: 25,
+    });
+    expect(ref('src/Greeter.java#Greeter#greet')).toMatchObject({
+      line: 13,
+      endLine: 16,
+    });
+    expect(ref('src/Greeter.java#Point#Point')).toMatchObject({
+      line: 53,
+      endLine: 55,
+    });
+    expect(ref('src/Greeter.java#Marker#value')).toMatchObject({
+      line: 63,
+      endLine: 63,
+    });
+  });
+
   // @lat: [[tests/section#formatSectionOutput renders source ref line ranges]]
   it('formatSectionOutput renders source ref line ranges', async () => {
     const ctx = testCtx('source-ref-ts-valid');
@@ -1530,6 +1991,31 @@ describe('getSection', () => {
     expect(output).toContain('src/app.ts:13-16');
     // Interface: should show range
     expect(output).toContain('src/app.ts:18-21');
+  });
+
+  // @lat: [[tests/section#formatSectionOutput marks source snippets as inline code]]
+  it('formatSectionOutput marks source snippets as robust Markdown inline code', async () => {
+    const sourceCtx = testCtx('source-ref-ts-valid');
+    const sourceResult = await getSection(sourceCtx, 'lat.md/docs#Docs');
+    expect(sourceResult.kind).toBe('found');
+    if (sourceResult.kind !== 'found') return;
+    const sourceOutput = stripAnsi(
+      formatSectionOutput(sourceCtx, sourceResult),
+    );
+    expect(sourceOutput).toContain(
+      '| `export function greet(name: string): string {`',
+    );
+    expect(sourceOutput).toContain('| ``  return `Hello, ${name}!`;``');
+
+    const backlinkCtx = testCtx('section-nested');
+    const backlinkResult = await getSection(backlinkCtx, 'guide#Guide');
+    expect(backlinkResult.kind).toBe('found');
+    if (backlinkResult.kind !== 'found') return;
+    const backlinkOutput = stripAnsi(
+      formatSectionOutput(backlinkCtx, backlinkResult),
+    );
+    const backlinkAnnotation = '// @' + 'lat: [[guide#Guide#Child]]';
+    expect(backlinkOutput).toContain(`| \`${backlinkAnnotation}\``);
   });
 
   // @lat: [[tests/section#formatSectionOutput includes all parts]]
@@ -1585,11 +2071,12 @@ describe('error-long-body', () => {
 
 describe('error-non-md-file', () => {
   // @lat: [[check-index#Detects non-markdown file]]
-  it('reports non-.md file as error', async () => {
+  it('reports an unreferenced non-.md file but allows a linked resource', async () => {
     const errors = await checkIndex(latDir('error-non-md-file'));
     const nonMd = errors.filter((e) => e.message.includes('not a .md file'));
     expect(nonMd).toHaveLength(1);
     expect(nonMd[0].message).toContain('README');
+    expect(nonMd[0].message).not.toContain('asset.svg');
   });
 
   // @lat: [[check-index#Non-markdown files excluded from index listing]]
@@ -1644,7 +2131,11 @@ describe('scanCodeRefs TS fallback (_LAT_DISABLE_RG)', () => {
 
   // @lat: [[tests/ts-fallback#gitignore filtering works without rg]]
   it('gitignore filtering works without rg', async () => {
-    const { refs, files } = await scanCodeRefs(caseDir('gitignore-filtering'));
+    const root = caseDir('gitignore-filtering');
+    const [{ refs }, files] = await Promise.all([
+      scanCodeRefs(root),
+      discoverSourceFiles(root),
+    ]);
     expect(refs).toHaveLength(1);
     expect(refs[0].file).toContain('src/app.ts');
     expect(files).toHaveLength(1);

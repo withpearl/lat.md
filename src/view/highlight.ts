@@ -1,23 +1,83 @@
 import { extname } from 'node:path';
-import hljs from 'highlight.js/lib/core';
+import type { ElementContent } from 'hast';
+import { createLowlight } from 'lowlight';
+import bash from 'highlight.js/lib/languages/bash';
 import c from 'highlight.js/lib/languages/c';
+import css from 'highlight.js/lib/languages/css';
+import dart from 'highlight.js/lib/languages/dart';
+import diff from 'highlight.js/lib/languages/diff';
 import go from 'highlight.js/lib/languages/go';
+import java from 'highlight.js/lib/languages/java';
 import javascript from 'highlight.js/lib/languages/javascript';
+import json from 'highlight.js/lib/languages/json';
+import markdown from 'highlight.js/lib/languages/markdown';
 import python from 'highlight.js/lib/languages/python';
+import ruby from 'highlight.js/lib/languages/ruby';
 import rust from 'highlight.js/lib/languages/rust';
 import typescript from 'highlight.js/lib/languages/typescript';
+import xml from 'highlight.js/lib/languages/xml';
+import yaml from 'highlight.js/lib/languages/yaml';
+import { textDocumentTree, toViewDocumentTree } from './document-tree.js';
+import type { ViewDocumentTree } from './protocol.js';
 
-hljs.registerLanguage('c', c);
-hljs.registerLanguage('go', go);
-hljs.registerLanguage('javascript', javascript);
-hljs.registerLanguage('python', python);
-hljs.registerLanguage('rust', rust);
-hljs.registerLanguage('typescript', typescript);
+const lowlight = createLowlight({
+  bash,
+  c,
+  css,
+  dart,
+  diff,
+  go,
+  java,
+  javascript,
+  json,
+  markdown,
+  python,
+  ruby,
+  rust,
+  typescript,
+  xml,
+  yaml,
+});
+
+const languageAliases: Record<string, string> = {
+  bash: 'bash',
+  c: 'c',
+  css: 'css',
+  dart: 'dart',
+  diff: 'diff',
+  go: 'go',
+  h: 'c',
+  html: 'xml',
+  java: 'java',
+  js: 'javascript',
+  javascript: 'javascript',
+  json: 'json',
+  jsx: 'javascript',
+  markdown: 'markdown',
+  md: 'markdown',
+  py: 'python',
+  python: 'python',
+  rb: 'ruby',
+  ruby: 'ruby',
+  rs: 'rust',
+  rust: 'rust',
+  sh: 'bash',
+  shell: 'bash',
+  svg: 'xml',
+  ts: 'typescript',
+  tsx: 'typescript',
+  typescript: 'typescript',
+  xml: 'xml',
+  yaml: 'yaml',
+  yml: 'yaml',
+};
 
 const languageByExtension: Record<string, string> = {
   '.c': 'c',
+  '.dart': 'dart',
   '.go': 'go',
   '.h': 'c',
+  '.java': 'java',
   '.js': 'javascript',
   '.jsx': 'javascript',
   '.py': 'python',
@@ -26,51 +86,60 @@ const languageByExtension: Record<string, string> = {
   '.tsx': 'typescript',
 };
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#x27;');
+export type HighlightedCodeTree = {
+  type: 'root';
+  children: ElementContent[];
+};
+
+/** Highlight a supported fenced-code language into a safe HAST fragment. */
+export function highlightCode(
+  language: string,
+  content: string,
+): HighlightedCodeTree | null {
+  const registeredLanguage = languageAliases[language.toLowerCase()];
+  if (!registeredLanguage) return null;
+  const tree = lowlight.highlight(registeredLanguage, content);
+  return {
+    type: 'root',
+    children: tree.children.filter(
+      (node): node is ElementContent => node.type !== 'doctype',
+    ),
+  };
 }
 
-function splitHighlightedLines(html: string): string[] {
-  const lines: string[] = [];
-  const openSpans: string[] = [];
-  const token = /<span class="[^"]+">|<\/span>|\n/g;
-  let line = '';
-  let cursor = 0;
-
-  for (const match of html.matchAll(token)) {
-    line += html.slice(cursor, match.index);
-    const value = match[0];
-    if (value === '\n') {
-      line += '</span>'.repeat(openSpans.length);
-      lines.push(line);
-      line = openSpans.join('');
-    } else if (value === '</span>') {
-      openSpans.pop();
-      line += value;
-    } else {
-      openSpans.push(value);
-      line += value;
-    }
-    cursor = match.index + value.length;
+function splitHighlightedNode(node: ElementContent): ElementContent[][] {
+  if (node.type !== 'element') {
+    return node.value.split('\n').map((value) => [{ ...node, value }]);
   }
-  line += html.slice(cursor);
-  lines.push(line);
+  return splitHighlightedNodes(node.children).map((children) => [
+    { ...node, properties: { ...node.properties }, children },
+  ]);
+}
+
+/** Split a HAST fragment at text newlines while cloning spanning elements. */
+function splitHighlightedNodes(
+  nodes: readonly ElementContent[],
+): ElementContent[][] {
+  const lines: ElementContent[][] = [[]];
+  for (const node of nodes) {
+    const fragments = splitHighlightedNode(node);
+    lines[lines.length - 1].push(...fragments[0]);
+    for (const fragment of fragments.slice(1)) lines.push(fragment);
+  }
   return lines;
 }
 
-/** Highlight source into independently valid, escaped HTML lines. */
-export function highlightSource(path: string, content: string): string[] {
-  const language = languageByExtension[extname(path)];
-  if (!language) return content.split(/\r?\n/).map(escapeHtml);
+/** Highlight source directly into independently renderable document trees. */
+export function highlightSource(
+  path: string,
+  content: string,
+): ViewDocumentTree[] {
   const normalized = content.replaceAll('\r\n', '\n');
-  const highlighted = hljs.highlight(normalized, {
-    language,
-    ignoreIllegals: true,
-  }).value;
-  return splitHighlightedLines(highlighted);
+  const language = languageByExtension[extname(path)];
+  if (!language) return normalized.split('\n').map(textDocumentTree);
+  const highlighted = highlightCode(language, normalized);
+  if (!highlighted) return normalized.split('\n').map(textDocumentTree);
+  return splitHighlightedNodes(highlighted.children).map((children) =>
+    toViewDocumentTree({ type: 'root', children }),
+  );
 }

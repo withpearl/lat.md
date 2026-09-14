@@ -13,6 +13,7 @@ Shared patterns for writing and organizing tests in this project.
 **Error cases use `error-` prefix.** Test fixture directories that assert error behavior are named with an `error-` prefix (e.g. `error-broken-links`, `error-stale-index`). Success/happy-path fixtures use plain descriptive names (e.g. `valid-links`, `short-ref`).
 
 - [[section-parsing]] — Parsing markdown into hierarchical section trees
+- [[analysis-tests]] — AST-free file facts, executor equivalence, and request-scoped snapshot reuse
 - [[ref-extraction]] — Extracting wiki link references from markdown files
 - [[section-preview]] — Formatting section previews for terminal output
 - [[check-md]] — Validating wiki links in lat.md markdown files
@@ -22,7 +23,6 @@ Shared patterns for writing and organizing tests in this project.
 - [[refs-e2e]] — End-to-end tests for the refs command
 - [[search]] — Semantic search provider detection and RAG replay tests
 - [[check-index]] — Validating directory index files
-- [[check-all]] — Whole-vault check runs share one read and parse across phases
 - [[expand]] — Expand command ref expansion and context block formatting
 - [[ref-resolution]] — Wiki link and code ref resolution across vault subdirectories
 - [[mcp]] — MCP server tool listing and tool call responses
@@ -34,3 +34,5 @@ Shared patterns for writing and organizing tests in this project.
 - [[init]] — Initialization defaults for local-first semantic search
 - [[config]] — User-level configuration and repository embedding preference persistence
 - [[ts-fallback]] — Pure-TypeScript code-ref scanner fallback without ripgrep
+- [[php-source-parser]] — PHP source parsing and code-reference scanning
+- [[external-tests|external sources]] — Pinned external configuration, retrieval strategies, cache reconciliation, commands, MCP, and browser export

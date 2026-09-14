@@ -20,7 +20,7 @@ import {
 } from './gen.js';
 import { getLlmKey, getRepoEmbedding, setRepoEmbedding } from '../config.js';
 import { makeStyler } from './context.js';
-import { closeDb, ensureMeta, getStoredModel, openDb } from '../search/db.js';
+import { closeDb, getStoredModel, openDb } from '../search/db.js';
 import { modelKey } from '../search/embedder.js';
 import { reindexCommand } from './reindex.js';
 import {
@@ -33,6 +33,7 @@ import {
 import { getLocalVersion, fetchLatestVersion } from '../version.js';
 import { selectMenu, type SelectOption } from './select-menu.js';
 import { checklistMenu } from './checklist-menu.js';
+import { readInitAgents, writeInitAgents } from './init-preferences.js';
 
 async function confirm(
   rl: ReturnType<typeof createInterface>,
@@ -1088,11 +1089,30 @@ type EmbeddingBackend = 'local' | 'remote';
 async function readStoredEmbeddingModel(
   latDir: string,
 ): Promise<string | null> {
-  if (!existsSync(join(latDir, '.cache', 'vectors.db'))) return null;
+  if (!existsSync(join(latDir, '.cache', 'search-index.json'))) {
+    const old = join(latDir, '.cache', 'vectors.db');
+    if (!existsSync(old)) return null;
+    const { createClient } = await import('@libsql/client');
+    const legacy = createClient({ url: `file:${old}` });
+    try {
+      const tables = await legacy.execute(
+        "SELECT name FROM sqlite_master WHERE name='meta'",
+      );
+      if (!tables.rows.length) return null;
+      return (
+        ((
+          await legacy.execute(
+            "SELECT value FROM meta WHERE key='embedding_model'",
+          )
+        ).rows[0]?.value as string) ?? null
+      );
+    } finally {
+      legacy.close();
+    }
+  }
 
-  const db = openDb(latDir);
+  const db = openDb(latDir, undefined, true);
   try {
-    await ensureMeta(db);
     return await getStoredModel(db);
   } finally {
     await closeDb(db);
@@ -1329,6 +1349,15 @@ export function readLogo(): string {
   return readFileSync(join(findTemplatesDir(), 'logo.txt'), 'utf-8');
 }
 
+export function ensureLatLocalConfigIgnored(latDir: string): void {
+  const path = join(latDir, '.gitignore');
+  const entry = 'config.local.yaml';
+  const current = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  if (current.split(/\r?\n/).includes(entry)) return;
+  const prefix = current && !current.endsWith('\n') ? `${current}\n` : current;
+  writeFileSync(path, `${prefix}${entry}\n`);
+}
+
 export async function initCmd(targetDir?: string): Promise<void> {
   console.log(styleText('cyan', readLogo()));
 
@@ -1396,6 +1425,9 @@ export async function initCmd(targetDir?: string): Promise<void> {
       console.log(styleText('green', 'Created lat.md/'));
     }
 
+    ensureLatLocalConfigIgnored(latDir);
+    ensureGitignored(root, '.lat-build');
+
     // Step 2: Configure fresh/outdated setups, ask interactive users about an
     // available key, and offer to rebuild an index whose backend differs. This
     // happens before agent selection so "no agents" still completes it.
@@ -1421,6 +1453,7 @@ export async function initCmd(targetDir?: string): Promise<void> {
     const selectedAgents = await checklistMenu(
       allAgents,
       'Which coding agents do you use?',
+      readInitAgents(latDir),
     );
 
     const useClaudeCode = selectedAgents.includes('claude');
@@ -1475,6 +1508,7 @@ export async function initCmd(targetDir?: string): Promise<void> {
       // agent. Stamp the version so future non-interactive runs do not reapply
       // fresh/outdated defaults and overwrite the chosen backend.
       writeInitMeta(latDir, {});
+      if (interactive) writeInitAgents(latDir, selectedAgents);
       console.log('');
       console.log(
         styleText('dim', 'No agents selected. You can re-run') +
@@ -1541,6 +1575,7 @@ export async function initCmd(targetDir?: string): Promise<void> {
 
     // Record init version and file hashes so `lat check` can detect stale setups
     writeInitMeta(latDir, fileHashes);
+    if (interactive) writeInitAgents(latDir, selectedAgents);
 
     console.log('');
     console.log(

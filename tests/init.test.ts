@@ -12,11 +12,19 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import xdg from '@folder/xdg';
+import { parse as parseYaml } from 'yaml';
+import { checklistMenu } from '../src/cli/checklist-menu.js';
 import {
   INIT_VERSION,
   readInitVersion,
   writeInitMeta,
 } from '../src/init-version.js';
+import { analyzeMarkdownFile } from '../src/markdown-analysis.js';
+import {
+  readAgentsTemplate,
+  readCursorRulesTemplate,
+  readSkillTemplate,
+} from '../src/cli/gen.js';
 
 const cliPath = join(
   import.meta.dirname,
@@ -66,6 +74,12 @@ vi.mock('../src/cli/checklist-menu.js', () => ({
   checklistMenu: vi.fn(async () => []),
 }));
 vi.mock('../src/cli/select-menu.js', () => ({ selectMenu }));
+vi.mock('node:readline/promises', () => ({
+  createInterface: vi.fn(() => ({
+    question: vi.fn(async () => 'n'),
+    close: vi.fn(),
+  })),
+}));
 vi.mock('../src/cli/reindex.js', () => ({ reindexCommand }));
 vi.mock('../src/search/db.js', () => ({
   closeDb,
@@ -75,6 +89,27 @@ vi.mock('../src/search/db.js', () => ({
 }));
 
 import { initCmd } from '../src/cli/init.js';
+
+describe('generated Markdown templates', () => {
+  // @lat: [[init#Generated instructions#Templates satisfy graph validation]]
+  it('satisfies local graph validation in every Markdown template', () => {
+    const templates = [
+      ['AGENTS.md', readAgentsTemplate()],
+      ['cursor-rules.md', readCursorRulesTemplate()],
+      ['SKILL.md', readSkillTemplate()],
+    ] as const;
+
+    for (const [name, content] of templates) {
+      const analysis = analyzeMarkdownFile(
+        `/project/lat.md/${name}`,
+        content,
+        '/project/lat.md',
+        '/project',
+      );
+      expect(analysis.diagnostics, name).toEqual([]);
+    }
+  });
+});
 
 type CliResult = {
   stdout: string;
@@ -146,7 +181,10 @@ describe('lat init embedding setup', () => {
 
   function mockStoredModel(model: string): void {
     mkdirSync(join(latDir(), '.cache'), { recursive: true });
-    writeFileSync(join(latDir(), '.cache', 'vectors.db'), '');
+    writeFileSync(
+      join(latDir(), '.cache', 'search-index.json'),
+      JSON.stringify({ version: 1, file: 'search-test.db' }),
+    );
     getStoredModel.mockResolvedValue(model);
   }
 
@@ -200,6 +238,8 @@ describe('lat init embedding setup', () => {
     reindexCommand.mockReset();
     reindexCommand.mockResolvedValue({ output: 'Reindexed.' });
     selectMenu.mockReset();
+    vi.mocked(checklistMenu).mockReset();
+    vi.mocked(checklistMenu).mockResolvedValue([]);
     setRepoEmbedding.mockClear();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -216,6 +256,89 @@ describe('lat init embedding setup', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  // @lat: [[init#Agent preferences#Remembers completed selections]]
+  it('persists selected agents locally and restores them on the next init', async () => {
+    createLatDir();
+    setInteractive(true);
+    const path = join(latDir(), 'config.local.yaml');
+    writeFileSync(
+      path,
+      '# My checkout\nexternal-sources:\n  docs:\n    local-path: ../docs\n',
+    );
+    vi.mocked(checklistMenu).mockResolvedValueOnce(['codex', 'cursor']);
+    selectMenu.mockResolvedValue('global');
+
+    await initCmd(root);
+
+    const saved = readFileSync(path, 'utf8');
+    expect(saved).toContain('# My checkout');
+    expect(parseYaml(saved)).toEqual({
+      'external-sources': { docs: { 'local-path': '../docs' } },
+      init: { agents: ['codex', 'cursor'] },
+    });
+    expect(readFileSync(join(latDir(), '.gitignore'), 'utf8')).toContain(
+      'config.local.yaml',
+    );
+    expect(existsSync(join(root, '.codex', 'hooks.json'))).toBe(true);
+
+    await initCmd(root);
+
+    expect(checklistMenu).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      'Which coding agents do you use?',
+      ['codex', 'cursor'],
+    );
+    expect(parseYaml(readFileSync(path, 'utf8')).init.agents).toEqual([]);
+  });
+
+  // @lat: [[init#Agent preferences#Non-interactive runs preserve preferences]]
+  it('does not create or erase agent preferences without a TTY', async () => {
+    createLatDir();
+    const path = join(latDir(), 'config.local.yaml');
+    await initCmd(root);
+    expect(existsSync(path)).toBe(false);
+    const original = 'init:\n  agents: [codex]\n';
+    writeFileSync(path, original);
+
+    expectSuccess(runInit());
+
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    expect(existsSync(join(root, '.codex'))).toBe(false);
+  });
+
+  // @lat: [[init#Agent preferences#Aborted setup preserves preferences]]
+  it('does not save a selection when the command-style prompt is canceled', async () => {
+    createLatDir();
+    setInteractive(true);
+    const path = join(latDir(), 'config.local.yaml');
+    const original = 'init:\n  agents: [cursor]\n';
+    writeFileSync(path, original);
+    vi.mocked(checklistMenu).mockResolvedValue(['codex']);
+    selectMenu.mockResolvedValue(null);
+
+    await initCmd(root);
+
+    expect(readFileSync(path, 'utf8')).toBe(original);
+  });
+
+  // @lat: [[init#Agent preferences#Rejects invalid local preferences]]
+  it('reports invalid YAML or preference shapes without overwriting them', async () => {
+    createLatDir();
+    setInteractive(true);
+    const path = join(latDir(), 'config.local.yaml');
+    for (const original of [
+      'init: [',
+      '- codex\n',
+      'init: false\n',
+      'init:\n  agents: codex\n',
+    ]) {
+      writeFileSync(path, original);
+      await expect(initCmd(root)).rejects.toThrow('config.local.yaml');
+      expect(readFileSync(path, 'utf8')).toBe(original);
+    }
+    expect(checklistMenu).not.toHaveBeenCalled();
+  });
+
   // @lat: [[init#Embedding setup#Fresh init pins local embeddings]]
   it('pins local embeddings before agent selection on a fresh init', () => {
     const result = runInit('sk-test');
@@ -223,6 +346,20 @@ describe('lat init embedding setup', () => {
     expectSuccess(result);
     expect(readRepoEmbedding()).toBe('local');
     expect(readInitVersion(latDir())).toBe(INIT_VERSION);
+  });
+
+  // @lat: [[tests/init#Lat-owned build output ignore]]
+  it('gitignores the Lat-owned UI build output', async () => {
+    const git = spawnSync('git', ['init', '--quiet'], { cwd: root });
+    expect(git.status, git.stderr?.toString()).toBe(0);
+
+    await initCmd(root);
+
+    const ignored = readFileSync(join(root, '.gitignore'), 'utf8').split(
+      /\r?\n/,
+    );
+    expect(ignored).toContain('.lat-build');
+    expect(ignored).not.toContain('.vercel');
   });
 
   // @lat: [[init#Embedding setup#Configured key asks for a backend]]

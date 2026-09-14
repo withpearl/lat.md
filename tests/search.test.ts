@@ -9,35 +9,30 @@ import {
   openDb,
   ensureMeta,
   ensureSectionsSchema,
-  setStoredModel,
   closeDb,
 } from '../src/search/db.js';
-import { modelKey } from '../src/search/embedder.js';
 import { indexSections } from '../src/search/index.js';
-import { searchSections } from '../src/search/search.js';
+import {
+  DEFAULT_SEARCH_LIMIT,
+  DEFAULT_MIN_SIMILARITY,
+  searchSections,
+} from '../src/search/search.js';
 import { runSearch } from '../src/cli/search.js';
-import { reindexCommand } from '../src/cli/reindex.js';
-import { plainStyler } from '../src/context.js';
-import { loadAllSections } from '../src/lattice.js';
+import { formatResultList } from '../src/format.js';
+import { plainStyler, type CmdContext } from '../src/context.js';
+import type { Section } from '../src/lattice-model.js';
 import { startReplayServer, hasReplayData } from './rag-replay-server.js';
-import type { Client } from '@libsql/client';
+import { execFileSync } from 'node:child_process';
+import type { SearchDb as Client } from '../src/search/db.js';
 import type { Server } from 'node:http';
 
 // Passthrough spy on `readFile` so the indexing test below can count how many
 // times each lat.md file is read. Every other test sees the real implementation.
-const { readFileSpy, loadAllSectionsSpy } = vi.hoisted(() => ({
-  readFileSpy: vi.fn(),
-  loadAllSectionsSpy: vi.fn(),
-}));
+const { readFileSpy } = vi.hoisted(() => ({ readFileSpy: vi.fn() }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   readFileSpy.mockImplementation(actual.readFile);
   return { ...actual, readFile: readFileSpy };
-});
-vi.mock('../src/lattice.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/lattice.js')>();
-  loadAllSectionsSpy.mockImplementation(actual.loadAllSections);
-  return { ...actual, loadAllSections: loadAllSectionsSpy };
 });
 
 // --- Unit tests: provider detection (now lives in @lat.md/embed) ---
@@ -105,11 +100,35 @@ describe('search (rag, local)', () => {
       db,
       'how do we handle user login and security?',
       embedder,
+      DEFAULT_SEARCH_LIMIT,
+      0,
     );
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].id).toContain('Authentication');
-    expect(Number.isFinite(results[0].score)).toBe(true);
-    expect(results[0].score).toBeGreaterThanOrEqual(results.at(-1)!.score);
+    expect(Number.isFinite(results[0].rankScore)).toBe(true);
+    expect(results[0].rankScore).toBeGreaterThanOrEqual(
+      results.at(-1)!.rankScore,
+    );
+  });
+
+  // @lat: [[search#RAG Tests#Filters results below the similarity threshold]]
+  it('filters results below the similarity threshold', async () => {
+    const results = await searchSections(
+      db,
+      'xylophonically',
+      embedder,
+      100,
+      0,
+    );
+    const filtered = await searchSections(
+      db,
+      'xylophonically',
+      embedder,
+      100,
+      1,
+    );
+    expect(results.length).toBeGreaterThan(0);
+    expect(filtered).toEqual([]);
   });
 
   // @lat: [[search#RAG Tests#Finds performance section for latency query]]
@@ -118,6 +137,8 @@ describe('search (rag, local)', () => {
       db,
       'what tools do we use to measure response times?',
       embedder,
+      DEFAULT_SEARCH_LIMIT,
+      0,
     );
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].id).toContain('Performance');
@@ -148,32 +169,79 @@ describe('search (rag, local)', () => {
   });
 });
 
-/**
- * Clear every embedding-key source and point the config dir at a temp dir, so a
- * test resolves to the local model and never reads or writes the user's config.
- * Returns a function that restores the previous environment.
- */
-function isolateLatEnv(): () => void {
-  const keys = [
-    'LAT_LLM_KEY',
-    'LAT_LLM_KEY_FILE',
-    'LAT_LLM_KEY_HELPER',
-    'XDG_CONFIG_HOME',
-  ] as const;
-  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-  const cfg = mkdtempSync(join(tmpdir(), 'lat-cfg-'));
-  process.env.LAT_LLM_KEY = '';
-  process.env.LAT_LLM_KEY_FILE = '';
-  process.env.LAT_LLM_KEY_HELPER = '';
-  process.env.XDG_CONFIG_HOME = cfg;
-  return () => {
-    for (const k of keys) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
-    rmDirBestEffort(cfg);
+describe('search result formatting', () => {
+  const ctx: CmdContext = {
+    latDir: '/project/lat.md',
+    projectRoot: '/project',
+    styler: plainStyler,
+    mode: 'cli',
   };
-}
+  const section: Section = {
+    id: 'lat.md/architecture#Authentication',
+    heading: 'Authentication',
+    depth: 2,
+    file: 'lat.md/architecture',
+    filePath: 'lat.md/architecture.md',
+    children: [],
+    startLine: 3,
+    endLine: 8,
+    firstParagraph: 'Authentication uses signed sessions.',
+  };
+  const matches = [
+    { section, reason: 'semantic match', rankScore: 0.8123456789 },
+  ];
+
+  // @lat: [[search#RAG Tests#Debug output includes similarity scores]]
+  it('shows scores only when debug output is requested', () => {
+    const normal = formatResultList(ctx, 'Results:', matches);
+    const debug = formatResultList(ctx, 'Results:', matches, {
+      showScores: true,
+    });
+
+    expect(normal).toContain('(semantic match)');
+    expect(normal).not.toContain('score:');
+    expect(debug).toContain('score: 0.812346');
+  });
+});
+
+describe('search threshold policy', () => {
+  // @lat: [[search#RAG Tests#Applies the shared default result limit]]
+  it('applies the shared default result limit', async () => {
+    const db = {
+      execute: vi.fn().mockResolvedValue({ rows: [] }),
+    } as unknown as Client;
+    const embedder = {
+      name: 'test',
+      dimensions: 1,
+      maxInputTokens: 100,
+      tokenizerFingerprint: 'test',
+      countTokens: () => 1,
+      embed: vi.fn().mockResolvedValue([[1]]),
+    };
+    await searchSections(db, 'query', embedder);
+    expect(DEFAULT_SEARCH_LIMIT).toBe(5);
+    expect(db.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ args: ['[1]', 100] }),
+    );
+  });
+  // @lat: [[search#RAG Tests#Applies the shared default similarity threshold]]
+  it('uses a permissive semantic floor and validates overrides', async () => {
+    expect(DEFAULT_MIN_SIMILARITY).toBe(0.2);
+    const db = { execute: vi.fn() } as unknown as Client;
+    const embedder = {
+      name: 'test',
+      dimensions: 1,
+      maxInputTokens: 100,
+      tokenizerFingerprint: 'test',
+      countTokens: () => 1,
+      embed: vi.fn(),
+    };
+    await expect(searchSections(db, 'query', embedder, 5, NaN)).rejects.toThrow(
+      'min-similarity',
+    );
+    expect(embedder.embed).not.toHaveBeenCalled();
+  });
+});
 
 // --- Legacy cache upgrade: rebuild a pre-versioning index ---
 //
@@ -188,141 +256,46 @@ describe('search (rag, legacy cache upgrade)', () => {
 
     // Seed a populated 1536-dim table (as an old remote build would leave) with
     // no meta.embedding_model recorded.
-    const seed = openDb(latDir);
-    await ensureMeta(seed);
-    await ensureSectionsSchema(seed, 1536);
-    const bogus = JSON.stringify(new Array(1536).fill(0.1));
-    await seed.execute({
-      sql: `INSERT INTO sections (id, file, heading, content, content_hash, embedding, updated_at)
-            VALUES (?, ?, ?, ?, ?, vector(?), ?)`,
-      args: ['stale#Old', 'stale.md', 'Old', 'stale', 'deadbeef', bogus, 0],
-    });
-    await closeDb(seed);
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(join(latDir, '.cache'), { recursive: true });
+    execFileSync(process.execPath, [
+      join(import.meta.dirname, 'support', 'seed-legacy.mjs'),
+      join(latDir, '.cache', 'vectors.db'),
+    ]);
 
     // Clear the env so the rebuild resolves to the local 384-dim model — the
     // dimension mismatch that previously threw a raw libsql error at query time.
-    const restoreEnv = isolateLatEnv();
+    const savedKeys = [
+      'LAT_LLM_KEY',
+      'LAT_LLM_KEY_FILE',
+      'LAT_LLM_KEY_HELPER',
+      'XDG_CONFIG_HOME',
+    ] as const;
+    const saved = Object.fromEntries(savedKeys.map((k) => [k, process.env[k]]));
+    const cfg = mkdtempSync(join(tmpdir(), 'lat-cfg-'));
+    process.env.LAT_LLM_KEY = '';
+    process.env.LAT_LLM_KEY_FILE = '';
+    process.env.LAT_LLM_KEY_HELPER = '';
+    process.env.XDG_CONFIG_HOME = cfg;
 
     try {
       const result = await runSearch(
         latDir,
         'how do we handle user login and security?',
         5,
+        undefined,
+        { minSimilarity: 0 },
       );
       expect(result.matches.length).toBeGreaterThan(0);
       expect(result.matches[0].section.id).toContain('Authentication');
     } finally {
-      restoreEnv();
+      for (const k of savedKeys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+      rmDirBestEffort(cfg);
       rmDirBestEffort(join(latDir, '..'));
     }
-  });
-});
-
-// --- Vector index layout: compressed neighbour vectors, wide search beam ---
-//
-// DiskANN stores, per node, a copy of every neighbour's vector. At full float32
-// precision those copies made a 7 MB corpus build a 1.3 GB index, so they are
-// stored at one bit per dimension — and search keeps a wider candidate beam,
-// without which the 1-bit index lost real top-5 hits. `CREATE INDEX IF NOT
-// EXISTS` never touches an existing index: a cache built before the change keeps
-// working unchanged, and `lat reindex` is what rebuilds it.
-
-/** The index as every version before neighbour compression created it. */
-async function createUncompressedIndex(db: Client, dimensions: number) {
-  await ensureSectionsSchema(db, dimensions);
-  await db.execute('DROP INDEX sections_vec_idx');
-  await db.execute(
-    'CREATE INDEX sections_vec_idx ON sections (libsql_vector_idx(embedding))',
-  );
-}
-
-/**
- * What libSQL actually built for `sections_vec_idx`: the bytes it stores per
- * graph node, and the search beam it recorded. Index settings are stored as
- * 9-byte records — a key byte, then a little-endian u64 — where key 0x09 is
- * `search_l`.
- */
-async function vectorIndexLayout(
-  latDir: string,
-): Promise<{ blockBytes: number; searchL: number }> {
-  const db = openDb(latDir);
-  try {
-    const blocks = await db.execute(
-      'SELECT DISTINCT length(data) AS n FROM sections_vec_idx_shadow',
-    );
-    expect(blocks.rows).toHaveLength(1);
-    const meta = await db.execute(
-      "SELECT metadata FROM libsql_vector_meta_shadow WHERE name = 'sections_vec_idx'",
-    );
-    const settings = Buffer.from(meta.rows[0].metadata as ArrayBuffer);
-    let searchL = NaN;
-    for (let i = 0; i + 9 <= settings.length; i += 9) {
-      if (settings[i] === 0x09)
-        searchL = Number(settings.readBigUInt64LE(i + 1));
-    }
-    return { blockBytes: Number(blocks.rows[0].n), searchL };
-  } finally {
-    await closeDb(db);
-  }
-}
-
-describe('search (rag, vector index layout)', () => {
-  const query = 'how do we handle user login and security?';
-  let latDir: string;
-  let restoreEnv: () => void;
-  let uncompressed: { blockBytes: number; searchL: number };
-  let uncompressedHits: string[];
-
-  beforeAll(async () => {
-    restoreEnv = isolateLatEnv();
-    latDir = copyFixture();
-    const embedder = await createEmbedder({ model: minilm });
-    const db = openDb(latDir);
-    try {
-      await ensureMeta(db);
-      await createUncompressedIndex(db, embedder.dimensions);
-      await indexSections(latDir, db, embedder);
-      await setStoredModel(db, modelKey(embedder));
-    } finally {
-      await closeDb(db);
-    }
-    uncompressed = await vectorIndexLayout(latDir);
-  });
-
-  afterAll(() => {
-    restoreEnv?.();
-    if (latDir) rmDirBestEffort(join(latDir, '..'));
-  });
-
-  // @lat: [[search#RAG Tests#Search keeps an uncompressed index as built]]
-  it('keeps serving an index built before compression, unchanged', async () => {
-    const result = await runSearch(latDir, query, 5);
-    expect(result.matches[0].section.id).toContain('Authentication');
-    uncompressedHits = result.matches.map((m) => m.section.id);
-
-    expect(uncompressed.searchL).toBe(200); // libSQL's default beam
-    expect(await vectorIndexLayout(latDir)).toEqual(uncompressed);
-  });
-
-  // @lat: [[search#RAG Tests#Reindex compresses neighbour vectors]]
-  it('rebuilds it compressed, with a wide search beam, on reindex', async () => {
-    const reindexed = await reindexCommand(
-      {
-        latDir,
-        projectRoot: join(latDir, '..'),
-        styler: plainStyler,
-        mode: 'cli',
-      },
-      { local: true },
-    );
-    expect(reindexed.isError, reindexed.output).toBeFalsy();
-
-    // float32 → 1-bit neighbours: 384-dim nodes drop from ~80 KB to ~5 KB.
-    const rebuilt = await vectorIndexLayout(latDir);
-    expect(rebuilt.blockBytes).toBeLessThan(uncompressed.blockBytes / 10);
-    expect(rebuilt.searchL).toBe(1600);
-    const result = await runSearch(latDir, query, 5);
-    expect(result.matches.map((m) => m.section.id)).toEqual(uncompressedHits);
   });
 });
 
@@ -332,7 +305,13 @@ describe('search (rag, vector index layout)', () => {
 // so the hosted code path stays covered without a live key. Re-cook: pnpm cook-test-rag
 
 const capturing = !!process.env._LAT_TEST_CAPTURE_EMBEDDINGS;
-const replayDir = join(import.meta.dirname, 'cases', 'rag', 'replay-data');
+const replayDir = join(
+  import.meta.dirname,
+  'cases',
+  'rag',
+  'replay-data',
+  'owned-blocks-v1',
+);
 const canRunHosted = capturing || hasReplayData(replayDir);
 
 describe.skipIf(!canRunHosted)('search (rag, hosted replay)', () => {
@@ -429,56 +408,5 @@ describe('search (rag, file reads)', () => {
     for (const [file, reads] of readsPerFile) {
       expect(reads, `${file} read ${reads} times`).toBeLessThanOrEqual(2);
     }
-  });
-});
-
-// --- A search parses the vault once ---
-//
-// The index pass and hit resolution each parsed the whole vault; on a large
-// corpus that is a second per search spent re-reading what the first parse
-// already produced. The prompt hook parses once more on top for its section
-// index, so it can hand its parse in and skip the search's own.
-
-describe('search (rag, parse count)', () => {
-  let latDir: string;
-
-  beforeAll(() => {
-    latDir = copyFixture();
-  });
-
-  afterAll(() => {
-    if (latDir) rmDirBestEffort(join(latDir, '..'));
-  });
-
-  // @lat: [[search#RAG Tests#Search parses the vault once]]
-  it('parses the vault once per search, or not at all when handed a parse', async () => {
-    loadAllSectionsSpy.mockClear();
-    const first = await runSearch(latDir, 'user login and security', 5);
-    expect(first.matches.length).toBeGreaterThan(0);
-    expect(loadAllSectionsSpy).toHaveBeenCalledTimes(1); // builds the index
-
-    loadAllSectionsSpy.mockClear();
-    const warm = await runSearch(latDir, 'user login and security', 5);
-    expect(warm.matches.map((m) => m.section.id)).toEqual(
-      first.matches.map((m) => m.section.id),
-    );
-    expect(loadAllSectionsSpy).toHaveBeenCalledTimes(1); // index up to date
-
-    const sections = await loadAllSections(latDir);
-    loadAllSectionsSpy.mockClear();
-    const handed = await runSearch(
-      latDir,
-      'user login and security',
-      5,
-      undefined,
-      {
-        buildIndex: false,
-        sections,
-      },
-    );
-    expect(handed.matches.map((m) => m.section.id)).toEqual(
-      first.matches.map((m) => m.section.id),
-    );
-    expect(loadAllSectionsSpy).toHaveBeenCalledTimes(0);
   });
 });

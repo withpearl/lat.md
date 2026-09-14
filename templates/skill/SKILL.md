@@ -69,16 +69,35 @@ Sections are addressed by file path and heading chain:
 
 Examples: `lat.md/tests/search#RAG Replay Tests`, `cli#init`, `parser#Wiki Links`.
 
+Configured external sources use `[[handle:path/to/file.md#Heading]]` for
+Markdown headings and `[[handle:path/to/file.ts#symbol]]` for supported code
+symbols. Run `lat external show <handle>` before cloning an external source;
+its output includes the pinned commit and safe checkout suggestions.
+
 ## Wiki links
 
 Cross-reference other sections or source code with `[[target]]` or `[[target|alias]]`.
 
 ### Section links
 
+Section links connect related concepts while keeping their stable graph identities explicit.
+
 ```markdown
 See [[cli#init]] for setup details.
 The parser validates [[parser#Wiki Links|wiki link syntax]].
 ```
+
+### Repository path links
+
+Reference any existing file or directory beneath the project root without a fragment:
+
+```markdown
+[[schema.sql]]
+[[CHANGELOG]]
+[[src/components]]
+```
+
+Unsupported formats validate as references but cannot be opened by Lat. A `#fragment` requires a `lat.md/` section or a supported source file.
 
 ### Source code links
 
@@ -92,6 +111,8 @@ Reference functions, classes, constants, and methods in source files:
 [[src/app.go#Greeter#Greet]]            — Go method
 [[src/app.h#Greeter]]                   — C struct
 ```
+
+When prose names an implementation symbol or a behavior governed by one, link the symbol instead of using a bare code span or copying its literal value. Prefer `[[src/config.ts#DEFAULT_TIMEOUT]]` (or `[[src/config.ts#DEFAULT_TIMEOUT|the default timeout]]`) over a bare identifier or copied value. Keep the behavioral explanation in prose; the link makes its implementation binding navigable and validated.
 
 `lat check` validates that all targets exist.
 
@@ -110,7 +131,7 @@ def init():
     ...
 ```
 
-Supported comment styles: `//` (JS/TS/Rust/Go/C) and `#` (Python).
+Supported comment styles: `//` (JS/TS/Rust/Go/C/PHP) and `#` (Python/PHP).
 
 Place one `@lat:` comment per section, at the relevant code — not at the top of the file.
 
@@ -169,7 +190,7 @@ Currently the only supported field is `require-code-mention` for test spec enfor
 ## Validation
 
 Always run `lat check` after editing `lat.md/` files. It validates:
-- All wiki links point to existing sections or source code symbols
+- All wiki links point to existing sections, repository paths, or source code symbols
 - All relative markdown links point to existing files
 - Full and collapsed reference-style links have definitions
 - All `@lat:` code refs point to existing sections

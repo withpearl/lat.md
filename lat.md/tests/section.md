@@ -39,6 +39,14 @@ A section that is referenced by wiki links from other sections returns those ref
 
 Verifies that `formatSectionOutput` correctly renders the "Referenced by" block when a section has incoming references.
 
+## Parent section aggregates descendant references
+
+Requesting a parent section recursively includes outgoing references owned by descendant sections, plus code backlinks targeting any descendant.
+
+## Reference summaries preserve leading paragraphs
+
+Outgoing and incoming section lists render complete valid leading paragraphs rather than short previews, with a 300-character safety cap for invalid documents.
+
 ## Source refs include line range
 
 `getSection` populates `outgoingSourceRefs` with `line` and `endLine` from the resolved symbol, so callers can display the full extent of a function or class.
@@ -47,15 +55,10 @@ Verifies that `formatSectionOutput` correctly renders the "Referenced by" block 
 
 `formatSectionOutput` renders source code references with `file:startLine-endLine` when the symbol spans multiple lines, showing the full extent of the definition.
 
+## formatSectionOutput marks source snippets as inline code
+
+Outgoing source and code-backlink snippet lines use Markdown inline-code delimiters, including valid longer delimiters around source that contains backticks.
+
 ## formatSectionOutput includes all parts
 
 `formatSectionOutput` produces styled output containing section id, location, raw content, "This section references" with outgoing refs, "Referenced by" with incoming refs, and "Referenced by code" with `@lat:` back-references.
-
-
-## Shared index returns identical results
-
-`getSection` given a prebuilt `SectionIndex` returns a result deep-equal to a standalone lookup, for a full-id fixture and a short-id fixture — the shared path changes cost, never output.
-
-## Shared index parses and scans once
-
-With one `SectionIndex`, three lookups call `loadAllSections` and `scanCodeRefs` once in total and `extractRefs` not at all; without it each lookup parses the vault and scans the repo again. This keeps the prompt hook inside its timeout.

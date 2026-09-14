@@ -1,22 +1,24 @@
+import { lstatSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
-import { join, posix, relative } from 'node:path';
-import { toPosix, walkEntries } from './walk.js';
+import { availableParallelism } from 'node:os';
+import { join, relative } from 'node:path';
+import { isSourceFilePath, SOURCE_FILE_EXTENSIONS } from './source-formats.js';
+import { toPosix } from './path.js';
+import { ALWAYS_IGNORED_DIRECTORIES, walkEntries } from './walk.js';
+import type { Profiler } from './profiler.js';
 
 /** Glob patterns used to exclude directories/files from code-ref scanning.
  *  Shared between rg args and the TS fallback's walkFiles filter. */
-const EXCLUDE_DIRS = ['lat.md', '.claude'];
-const EXCLUDE_GLOBS = ['*.md'];
+const EXCLUDE_DIRS = ['lat.md', '.claude', ...ALWAYS_IGNORED_DIRECTORIES];
+const EXCLUDE_GLOBS = ['*.md', '.*', '**/.*'];
+const RG_IGNORE_ARGS = ['--no-require-git', '--ignore-file-case-insensitive'];
 
-/** Walk project files for code-ref scanning. Uses walkEntries for .gitignore
- *  support, then additionally skips .md files, lat.md/, .claude/, and sub-projects. */
+/** Walk supported source files for code-ref scanning. Uses walkEntries for
+ *  .gitignore support, then additionally skips lat.md/, .claude/, and
+ *  sub-projects. */
 export async function walkFiles(dir: string): Promise<string[]> {
   const entries = (await walkEntries(dir)).map(toPosix);
-  const generatedOutputs = new Set(
-    entries
-      .filter((entry) => entry.endsWith('/.lat-ui-build'))
-      .map((entry) => `${posix.dirname(entry)}/`),
-  );
 
   // Collect directories that contain their own lat.md/ (sub-projects)
   const subProjects = new Set<string>();
@@ -28,10 +30,9 @@ export async function walkFiles(dir: string): Promise<string[]> {
   return entries
     .filter(
       (e) =>
-        !e.endsWith('.md') &&
+        isSourceFilePath(e) &&
         !e.startsWith('lat.md/') &&
         !e.startsWith('.claude/') &&
-        ![...generatedOutputs].some((prefix) => e.startsWith(prefix)) &&
         ![...subProjects].some((prefix) => e.startsWith(prefix)),
     )
     .map((e) => join(dir, e));
@@ -60,9 +61,20 @@ export type CodeRef = {
 
 export type ScanResult = {
   refs: CodeRef[];
-  files: string[];
-  usedRg: boolean;
 };
+
+export type CodeReferenceDiscovery = {
+  scan: () => Promise<ScanResult>;
+  listSourceFiles: () => Promise<string[]>;
+};
+
+function profileScan<T>(
+  profile: Pick<Profiler, 'time'> | undefined,
+  label: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  return profile ? profile.time(label, work) : work();
+}
 
 /**
  * Run an external command and return stdout, or null if the command is not found
@@ -76,7 +88,7 @@ function tryExec(
   return new Promise((resolve) => {
     execFile(cmd, args, { cwd, maxBuffer: 50 * 1024 * 1024 }, (err, out) => {
       if (err) {
-        // Exit code 1 with no stderr typically means "no matches" for grep/rg
+        // Exit code 1 with no stderr typically means "no matches" for rg.
         const exitCode = (
           err as NodeJS.ErrnoException & { code?: string | number }
         ).code;
@@ -84,7 +96,7 @@ function tryExec(
           resolve(null); // command not found
           return;
         }
-        // rg/grep exit 1 = no matches (not an error)
+        // rg exit 1 = no matches (not an error)
         if (
           'status' in err &&
           (err as { status?: number }).status === 1 &&
@@ -112,7 +124,7 @@ async function findSubProjects(projectRoot: string): Promise<string[]> {
   // need to find nested ones here — search for files under */lat.md/.
   const out = await tryExec(
     'rg',
-    ['--files', '--glob', '**/lat.md/**', '.'],
+    ['--files', ...RG_IGNORE_ARGS, '--glob', '**/lat.md/**', '.'],
     projectRoot,
   );
   if (!out) return [];
@@ -131,82 +143,217 @@ async function findSubProjects(projectRoot: string): Promise<string[]> {
   return [...subProjects];
 }
 
-/** Find static UI exports so generated JSON and bundles never become code refs. */
-async function findGeneratedOutputs(projectRoot: string): Promise<string[]> {
+function nestedLatProjects(paths: readonly string[]): string[] {
+  const projects = new Set<string>();
+  for (const path of paths) {
+    const index = path.indexOf('/lat.md/');
+    if (index !== -1) projects.add(path.slice(0, index));
+  }
+  return [...projects];
+}
+
+function hasDotDirectory(path: string): boolean {
+  const parts = path.split('/');
+  return parts.slice(0, -1).some((part) => part.startsWith('.'));
+}
+
+/** List readable regular source files tracked by the enclosing Git repository. */
+async function findGitTrackedSourceFiles(
+  projectRoot: string,
+): Promise<string[] | null> {
   const out = await tryExec(
-    'rg',
-    ['--files', '--hidden', '--glob', '**/.lat-ui-build', '.'],
+    'git',
+    ['ls-files', '--stage', '-z', '--', '.'],
     projectRoot,
   );
-  if (!out) return [];
+  if (out === null) return null;
 
-  return [
-    ...new Set(
-      out
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => toPosix(line).replace(/^\.\//, ''))
-        .filter((line) => line.endsWith('/.lat-ui-build'))
-        .map((line) => posix.dirname(line)),
-    ),
-  ];
+  const entries = out
+    .split('\0')
+    .filter(Boolean)
+    .flatMap((entry) => {
+      const tab = entry.indexOf('\t');
+      if (tab === -1) return [];
+      const mode = entry.slice(0, entry.indexOf(' '));
+      if (mode !== '100644' && mode !== '100755') return [];
+      return [toPosix(entry.slice(tab + 1))];
+    });
+  const subProjects = nestedLatProjects(entries);
+  const candidates = entries.filter(
+    (path) =>
+      isSourceFilePath(path) &&
+      !hasDotDirectory(path) &&
+      !path.startsWith('lat.md/') &&
+      !subProjects.some(
+        (project) => path === project || path.startsWith(`${project}/`),
+      ),
+  );
+
+  return candidates
+    .flatMap((path) => {
+      const absolute = join(projectRoot, path);
+      try {
+        return lstatSync(absolute).isFile() ? [absolute] : [];
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw error;
+      }
+    })
+    .sort((a, b) => a.localeCompare(b, 'en'));
 }
 
 /** Build rg glob exclusion args. */
-function rgExcludeArgs(
-  subProjects: string[],
-  generatedOutputs: string[],
-): string[] {
+function rgExcludeArgs(subProjects: string[]): string[] {
   const args: string[] = [];
   for (const dir of EXCLUDE_DIRS) args.push('--glob', `!${dir}/`);
   for (const glob of EXCLUDE_GLOBS) args.push('--glob', `!${glob}`);
   for (const sp of subProjects) args.push('--glob', `!${sp}/`);
-  for (const output of generatedOutputs) args.push('--glob', `!${output}/`);
   return args;
 }
 
-/**
- * Try scanning with ripgrep. Returns parsed refs and scanned file list, or null
- * if rg is not available. rg respects .gitignore by default; we add glob
- * exclusions for lat.md/, .claude/, *.md files, and sub-projects.
- */
-async function tryRipgrep(
-  projectRoot: string,
-): Promise<{ refs: CodeRef[]; files: string[] } | null> {
-  // Detect sub-projects first so we can exclude them from all rg calls
-  const subProjects = await findSubProjects(projectRoot);
-  const generatedOutputs = await findGeneratedOutputs(projectRoot);
-  const excludes = rgExcludeArgs(subProjects, generatedOutputs);
+/** Build an rg file type from the shared supported-source registry. */
+function rgSourceIncludeArgs(): string[] {
+  return [
+    ...SOURCE_FILE_EXTENSIONS.flatMap((extension) => [
+      '--type-add',
+      `latsource:*${extension}`,
+    ]),
+    '--type',
+    'latsource',
+  ];
+}
 
-  // Search for @lat refs
+async function discoverRipgrepExcludes(
+  projectRoot: string,
+  profile?: Pick<Profiler, 'time'>,
+): Promise<string[]> {
+  const subProjects = await profileScan(
+    profile,
+    'find nested lat.md projects with ripgrep',
+    () => findSubProjects(projectRoot),
+  );
+  return rgExcludeArgs(subProjects);
+}
+
+function ripgrepPathBatches(paths: string[]): string[][] {
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let length = 0;
+  for (const path of paths) {
+    if (batch.length > 0 && length + path.length + 1 > 16_000) {
+      batches.push(batch);
+      batch = [];
+      length = 0;
+    }
+    batch.push(path);
+    length += path.length + 1;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
+async function runRipgrepBatches(
+  projectRoot: string,
+  args: string[],
+  paths: string[],
+): Promise<string[] | null> {
+  const batches = ripgrepPathBatches(paths);
+  if (batches.length === 0) return [];
+  const results = new Array<string | null>(batches.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(availableParallelism(), batches.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= batches.length) return;
+        results[index] = await tryExec(
+          'rg',
+          [...args, '--', ...batches[index]],
+          projectRoot,
+        );
+      }
+    }),
+  );
+
+  return results.some((result) => result === null)
+    ? null
+    : (results as string[]);
+}
+
+/** Search supported source files for code references with ripgrep. */
+async function tryRipgrepCodeRefs(
+  projectRoot: string,
+  excludes: string[],
+  profile?: Pick<Profiler, 'time'>,
+  files?: string[],
+): Promise<CodeRef[] | null> {
   const searchArgs = [
     '--no-heading',
     '--line-number',
     '--with-filename',
+    ...RG_IGNORE_ARGS,
+    ...rgSourceIncludeArgs(),
     ...excludes,
     '@lat:.*\\[\\[',
-    '.',
   ];
-  const out = await tryExec('rg', searchArgs, projectRoot);
-  if (out === null) return null;
-
-  const { refs } = parseGrepOutput(out, projectRoot);
-
-  // List all scanned files (for stats) — rg --files is fast
-  const filesOut = await tryExec(
-    'rg',
-    ['--files', ...excludes, '.'],
-    projectRoot,
+  const outputs = await profileScan(
+    profile,
+    'scan @lat references with ripgrep',
+    () =>
+      files
+        ? runRipgrepBatches(
+            projectRoot,
+            searchArgs,
+            files.map((file) => toPosix(relative(projectRoot, file))),
+          )
+        : tryExec('rg', [...searchArgs, '.'], projectRoot).then((output) =>
+            output === null ? null : [output],
+          ),
   );
+  if (outputs === null) return null;
+
+  const refs = outputs.flatMap(
+    (output) => parseGrepOutput(output, projectRoot).refs,
+  );
+  refs.sort((a, b) => a.file.localeCompare(b.file, 'en') || a.line - b.line);
+  return refs;
+}
+
+/** Discover the supported source-file scope with ripgrep. */
+async function tryRipgrepSourceFiles(
+  projectRoot: string,
+  excludes: string[],
+  profile?: Pick<Profiler, 'time'>,
+): Promise<string[] | null> {
+  const filesOut = await profileScan(
+    profile,
+    'list source files with ripgrep',
+    () =>
+      tryExec(
+        'rg',
+        [
+          '--files',
+          ...RG_IGNORE_ARGS,
+          ...rgSourceIncludeArgs(),
+          ...excludes,
+          '.',
+        ],
+        projectRoot,
+      ),
+  );
+  if (filesOut === null) return null;
+
   const files = (filesOut || '')
     .split('\n')
     .filter(Boolean)
     .map((f) => {
       const clean = toPosix(f).replace(/^\.\//, '');
       return join(projectRoot, clean);
-    });
-
-  return { refs, files };
+    })
+    .sort((a, b) => a.localeCompare(b, 'en'));
+  return files;
 }
 
 /**
@@ -251,37 +398,62 @@ function parseGrepOutput(
   return { refs };
 }
 
-/**
- * TypeScript fallback: read every file and scan for @lat refs.
- */
+type TsFileScan = { refs: CodeRef[]; error?: string };
+
+async function scanFileWithTs(
+  file: string,
+  projectRoot: string,
+): Promise<TsFileScan> {
+  let content: string;
+  try {
+    content = await readFile(file, 'utf-8');
+  } catch (err) {
+    return {
+      refs: [],
+      error: `Error: failed to read ${file}: ${(err as Error).message}\n`,
+    };
+  }
+
+  const refs: CodeRef[] = [];
+  const relativePath = toPosix(relative(projectRoot, file));
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    LAT_REF_RE.lastIndex = 0;
+    let match;
+    while ((match = LAT_REF_RE.exec(lines[i])) !== null) {
+      refs.push({
+        target: match[1],
+        file: relativePath,
+        line: i + 1,
+      });
+    }
+  }
+  return { refs };
+}
+
+/** TypeScript fallback: scan supported source files through a bounded pool. */
 async function scanWithTs(
   files: string[],
   projectRoot: string,
 ): Promise<CodeRef[]> {
-  const refs: CodeRef[] = [];
+  const results = new Array<TsFileScan>(files.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(availableParallelism(), files.length);
 
-  for (const file of files) {
-    let content: string;
-    try {
-      content = await readFile(file, 'utf-8');
-    } catch (err) {
-      process.stderr.write(
-        `Error: failed to read ${file}: ${(err as Error).message}\n`,
-      );
-      continue;
-    }
-    const lines = content.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      let match;
-      LAT_REF_RE.lastIndex = 0;
-      while ((match = LAT_REF_RE.exec(lines[i])) !== null) {
-        refs.push({
-          target: match[1],
-          file: toPosix(relative(projectRoot, file)),
-          line: i + 1,
-        });
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= files.length) return;
+        results[index] = await scanFileWithTs(files[index], projectRoot);
       }
-    }
+    }),
+  );
+
+  const refs: CodeRef[] = [];
+  for (const result of results) {
+    if (result.error) process.stderr.write(result.error);
+    refs.push(...result.refs);
   }
 
   return refs;
@@ -293,18 +465,84 @@ export async function hasRipgrep(): Promise<boolean> {
   return result !== null;
 }
 
-export async function scanCodeRefs(projectRoot: string): Promise<ScanResult> {
-  // Fast path: use rg for both searching and file listing
-  // _LAT_DISABLE_RG is a test-only escape hatch to force the TS fallback
-  if (process.env._LAT_DISABLE_RG !== '1') {
-    const rgResult = await tryRipgrep(projectRoot);
-    if (rgResult !== null) {
-      return { refs: rgResult.refs, files: rgResult.files, usedRg: true };
-    }
-  }
+/**
+ * Create a lazy project-scoped discovery API. Code-reference scanning and
+ * source-file inventory are separate operations, but share ripgrep exclusion
+ * discovery and coalesce fallback file walking when both are requested.
+ */
+export function createCodeReferenceDiscovery(
+  projectRoot: string,
+  profile?: Pick<Profiler, 'time'>,
+): CodeReferenceDiscovery {
+  let excludesPromise: Promise<string[]> | undefined;
+  let trackedFilesPromise: Promise<string[] | null> | undefined;
+  let sourceFilesPromise: Promise<string[]> | undefined;
+  let scanPromise: Promise<ScanResult> | undefined;
 
-  // Fallback: walk files ourselves and scan with TS
-  const files = await walkFiles(projectRoot);
-  const refs = await scanWithTs(files, projectRoot);
-  return { refs, files, usedRg: false };
+  const ripgrepExcludes = () =>
+    (excludesPromise ??= discoverRipgrepExcludes(projectRoot, profile));
+
+  const trackedFiles = () =>
+    (trackedFilesPromise ??= profileScan(
+      profile,
+      'list tracked source files with git',
+      () => findGitTrackedSourceFiles(projectRoot),
+    ));
+
+  const listSourceFiles = () =>
+    (sourceFilesPromise ??= (async () => {
+      const tracked = await trackedFiles();
+      if (tracked !== null) return tracked;
+
+      if (process.env._LAT_DISABLE_RG !== '1') {
+        const files = await tryRipgrepSourceFiles(
+          projectRoot,
+          await ripgrepExcludes(),
+          profile,
+        );
+        if (files !== null) return files;
+      }
+
+      return profileScan(profile, 'walk project source files', () =>
+        walkFiles(projectRoot),
+      );
+    })());
+
+  const scan = () =>
+    (scanPromise ??= (async () => {
+      const tracked = await trackedFiles();
+      if (process.env._LAT_DISABLE_RG !== '1') {
+        const refs = await tryRipgrepCodeRefs(
+          projectRoot,
+          tracked === null ? await ripgrepExcludes() : [],
+          profile,
+          tracked ?? undefined,
+        );
+        if (refs !== null) return { refs };
+      }
+
+      const refs = await profileScan(
+        profile,
+        'scan project files with TypeScript fallback',
+        async () => scanWithTs(await listSourceFiles(), projectRoot),
+      );
+      return { refs };
+    })());
+
+  return { scan, listSourceFiles };
+}
+
+export async function scanCodeRefs(
+  projectRoot: string,
+  profile?: Pick<Profiler, 'time'>,
+): Promise<ScanResult> {
+  return createCodeReferenceDiscovery(projectRoot, profile).scan();
+}
+
+/** Discover the source files that may contain code references. */
+export async function discoverSourceFiles(
+  projectRoot: string,
+  profile?: Pick<Profiler, 'time'>,
+): Promise<string[]> {
+  return createCodeReferenceDiscovery(projectRoot, profile).listSourceFiles();
 }

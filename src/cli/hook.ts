@@ -1,22 +1,16 @@
 import { execSync } from 'node:child_process';
-import { dirname, extname } from 'node:path';
-import { findLatticeDir, loadAllSections } from '../lattice.js';
+import { lstatSync, readFileSync } from 'node:fs';
+import { dirname, extname, join } from 'node:path';
+import { findLatticeDir } from '../project-discovery.js';
 import { plainStyler, type CmdContext } from '../context.js';
 import { expandPrompt } from './expand.js';
 import { runSearch } from './search.js';
-import {
-  getSection,
-  buildSectionIndex,
-  formatSectionOutput,
-} from './section.js';
-import {
-  checkMd,
-  checkCodeRefs,
-  checkIndex,
-  checkSections,
-  loadVault,
-} from './check.js';
-import { SOURCE_EXTENSIONS } from '../source-parser.js';
+import { DEFAULT_SEARCH_LIMIT } from '../search/search.js';
+import { getSection, formatSectionOutput } from './section.js';
+import { checkMd, checkCodeRefs, checkIndex, checkSections } from './check.js';
+import { CheckRunContext } from './check-context.js';
+import { isSourceFileExtension } from '../source-formats.js';
+import { commandProjectAnalysis } from '../project-analysis.js';
 
 function outputPromptSubmit(context: string): void {
   process.stdout.write(
@@ -71,17 +65,21 @@ async function searchAndExpand(
   ctx: CmdContext,
   userPrompt: string,
 ): Promise<string | null> {
-  // The vault is parsed once and shared by the search and the section index.
-  const sections = await loadAllSections(ctx.latDir);
   let result;
   try {
     // Read-only: search an existing index but never build/update it here. A fresh
     // repo's first prompt must not trigger a full local embed pass — that's what
     // `lat search` / `lat reindex` are for. Returns no matches until then.
-    result = await runSearch(ctx.latDir, userPrompt, 5, undefined, {
-      buildIndex: false,
-      sections,
-    });
+    result = await runSearch(
+      ctx.latDir,
+      userPrompt,
+      DEFAULT_SEARCH_LIMIT,
+      undefined,
+      {
+        buildIndex: false,
+        project: await commandProjectAnalysis(ctx),
+      },
+    );
   } catch {
     // No usable backend (e.g. reindex required, key rejected) — skip semantic
     // enrichment silently rather than blocking the user's prompt.
@@ -94,12 +92,8 @@ async function searchAndExpand(
     '',
   ];
 
-  // One index for every match: parsing the vault, walking each file's links
-  // and scanning the repo for `@lat:` refs are seconds apiece on a large
-  // corpus, and doing them per match put this hook past its timeout.
-  const index = await buildSectionIndex(ctx, sections);
   for (const match of result.matches) {
-    const sectionResult = await getSection(ctx, match.section.id, index);
+    const sectionResult = await getSection(ctx, match.section.id);
     if (sectionResult.kind === 'found') {
       parts.push(formatSectionOutput(ctx, sectionResult));
       parts.push('');
@@ -182,37 +176,95 @@ const LATMD_RATIO = 0.05;
 /** If lat.md/ changes exceed this many lines, skip the ratio check entirely. */
 const LATMD_UPPER_THRESHOLD = 50;
 
-/** Run `git diff --numstat` and return { codeLines, latMdLines }. */
-function analyzeDiff(projectRoot: string): {
+type DiffFileKind = 'code' | 'latMd';
+
+function diffFileKind(file: string): DiffFileKind | null {
+  if (file.startsWith('lat.md/')) return 'latMd';
+  if (isSourceFileExtension(extname(file))) return 'code';
+  return null;
+}
+
+/** Count a regular text file's lines as additions, matching Git numstat. */
+function countUntrackedFileLines(projectRoot: string, file: string): number {
+  try {
+    const path = join(projectRoot, file);
+    if (!lstatSync(path).isFile()) return 0;
+    const text = readFileSync(path, 'utf-8');
+    if (text.length === 0) return 0;
+    return text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Measure code vs `lat.md/` churn since HEAD, in lines. Combines tracked
+ * changes (`git diff HEAD --numstat`) with untracked files
+ * (`git ls-files --others --exclude-standard -z`). Counting untracked files is
+ * what makes a freshly scaffolded, never-committed `lat.md/` register as
+ * updated — otherwise its edits are invisible to `git diff HEAD` and the sync
+ * reminder fires on every turn until `lat.md/` is committed (issue #61).
+ * Both scans are scoped and made relative to `projectRoot`, so a Lat project
+ * nested in a larger worktree neither misses its own `lat.md/` paths nor counts
+ * changes from sibling projects.
+ * Outside a Git worktree both scans contribute zero churn by design: Git is
+ * optional, so the hook still validates the project but skips the sync ratio.
+ */
+export function analyzeDiff(projectRoot: string): {
   codeLines: number;
   latMdLines: number;
 } {
-  let output: string;
-  try {
-    output = execSync('git diff HEAD --numstat', {
-      cwd: projectRoot,
-      encoding: 'utf-8',
-    });
-  } catch {
-    return { codeLines: 0, latMdLines: 0 };
-  }
-
   let codeLines = 0;
   let latMdLines = 0;
 
-  // Each line: "added\tremoved\tfile" (e.g. "42\t11\tsrc/cli/hook.ts")
-  for (const line of output.split('\n')) {
-    const parts = line.split('\t');
-    if (parts.length < 3) continue;
-    const added = parseInt(parts[0], 10) || 0;
-    const removed = parseInt(parts[1], 10) || 0;
-    const file = parts[2];
-    const changed = added + removed;
-    if (file.startsWith('lat.md/')) {
+  const tally = (kind: DiffFileKind, changed: number): void => {
+    if (kind === 'latMd') {
       latMdLines += changed;
-    } else if (SOURCE_EXTENSIONS.has(extname(file))) {
+    } else {
       codeLines += changed;
     }
+  };
+
+  // Tracked changes vs HEAD. Throws when there is no HEAD yet (a repo with no
+  // commits) or no repo at all; the untracked scan below still runs.
+  try {
+    const output = execSync('git diff HEAD --numstat --relative -- .', {
+      cwd: projectRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    // Each line: "added\tremoved\tfile" (e.g. "42\t11\tsrc/cli/hook.ts")
+    for (const line of output.split('\n')) {
+      const parts = line.split('\t');
+      if (parts.length < 3) continue;
+      const added = parseInt(parts[0], 10) || 0;
+      const removed = parseInt(parts[1], 10) || 0;
+      const kind = diffFileKind(parts[2]);
+      if (kind) tally(kind, added + removed);
+    }
+  } catch {
+    // Not a git repo, or no HEAD — fall through to the untracked scan.
+  }
+
+  // NUL-delimited output preserves spaces, non-ASCII names, and newlines.
+  // Classify paths before reading so unrelated untracked files are never read.
+  try {
+    const output = execSync(
+      'git ls-files --others --exclude-standard -z -- .',
+      {
+        cwd: projectRoot,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    );
+    for (const file of output.split('\0')) {
+      if (!file) continue;
+      const kind = diffFileKind(file);
+      if (!kind) continue;
+      tally(kind, countUntrackedFileLines(projectRoot, file));
+    }
+  } catch {
+    // Not a Git repo — diff-based sync analysis is intentionally disabled.
   }
 
   return { codeLines, latMdLines };
@@ -227,11 +279,14 @@ type StopStatus = {
 };
 
 async function getStopStatus(latDir: string): Promise<StopStatus> {
-  const vault = await loadVault(latDir);
-  const md = await checkMd(latDir, undefined, vault);
-  const code = await checkCodeRefs(latDir, undefined, vault);
-  const indexErrors = await checkIndex(latDir);
-  const sectionErrors = await checkSections(latDir, undefined, vault);
+  const projectRoot = dirname(latDir);
+  const run = new CheckRunContext(latDir, projectRoot);
+  const [md, code, indexErrors, sectionErrors] = await Promise.all([
+    checkMd(latDir, projectRoot, run),
+    checkCodeRefs(latDir, projectRoot, run),
+    checkIndex(latDir, run),
+    checkSections(latDir, projectRoot, run),
+  ]);
   const totalErrors =
     md.errors.length +
     code.errors.length +
@@ -239,7 +294,6 @@ async function getStopStatus(latDir: string): Promise<StopStatus> {
     sectionErrors.length;
   const checkFailed = totalErrors > 0;
 
-  const projectRoot = dirname(latDir);
   const { codeLines, latMdLines } = analyzeDiff(projectRoot);
   let needsSync = false;
   if (codeLines >= DIFF_THRESHOLD && latMdLines < LATMD_UPPER_THRESHOLD) {

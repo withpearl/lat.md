@@ -2,6 +2,7 @@
 lat:
   require-code-mention: true
 ---
+
 # Search
 
 Tests in `tests/search.test.ts`.
@@ -22,7 +23,7 @@ network, and no replay recording.
 The test covers indexing, hashing, vector insert, and KNN search. Fixture lives in
 `tests/cases/rag/lat.md/` (9 sections across 2 files). A supplementary `search (rag, hosted replay)`
 group exercises the hosted `fetch` backend against a local OpenAI-compatible replay server
-(`tests/rag-replay-server.ts`); it runs only when `tests/cases/rag/replay-data/` is present and is
+(`tests/rag-replay-server.ts`); it runs only when `tests/cases/rag/replay-data/owned-blocks-v1/` is present and is
 re-cooked with `pnpm cook-test-rag` if hosted chunking changes.
 
 ### Indexes all sections
@@ -34,10 +35,27 @@ Index the RAG fixture (9 sections across 2 files), verify counts.
 Search for "how do we handle user login and security?" and verify the Authentication section ranks
 first.
 
+### Filters results below the similarity threshold
+
+Semantic candidates must meet the requested cosine minimum. Independent lexical matches remain eligible below this threshold.
+
+### Applies the shared default similarity threshold
+
+Every semantic-search path applies [[src/search/search.ts#DEFAULT_MIN_SIMILARITY]] unless its public interface supplies an
+explicit override, keeping CLI, MCP, hooks, and UI ranking policy aligned.
+
+### Applies the shared default result limit
+
+CLI, MCP, and prompt-hook semantic search use [[src/search/search.ts#DEFAULT_SEARCH_LIMIT]] unless a caller explicitly overrides it; the UI retains its named presentation-specific limit.
+
 ### Finds performance section for latency query
 
 Search for "what tools do we use to measure response times?" and verify the Performance Tests
 section ranks first.
+
+### Debug output includes similarity scores
+
+Search debug output exposes the fused rank score and individual retrieval contributions while normal output shows source evidence.
 
 ### Deterministic embeddings
 
@@ -60,31 +78,114 @@ however many sections it holds: the parser reads it once and section slicing reu
 Before this was pinned, a 3.5 MB file holding 12k sections was re-read once per section — 12k
 times on every search.
 
-### Search parses the vault once
-
-`runSearch` calls `loadAllSections` once whether it is building the index or finding it up to date, and not at all in read-only mode when the caller hands in an already-parsed vault. Results are identical across all three.
-
 ### Rebuilds a legacy cache with no recorded model
 
 Seed a 1536-dim `sections` table with rows but no `meta.embedding_model`, then run a local-backed
-search: the mismatched table is dropped and rebuilt at 384 dims and the query succeeds.
+search: the old file is archived with .old-12, a Turso index is built at 384 dimensions, and the query succeeds.
 
 This is the pre-versioning `.cache` upgrade path — before, the stale table was queried and threw a
 raw dimension-mismatch error.
 
-### Search keeps an uncompressed index as built
+### Reuses an indexed search session
 
-An index created without neighbour compression keeps answering `runSearch` correctly, and its
-on-disk node blocks are left exactly as built — search never rebuilds or converts it.
+An indexed search session owns one database and embedder, applies each query's limit and threshold, and returns storage rows without project metadata. A shared resolver hydrates known section ids for every caller.
 
-Upgrading the CLI alone must not trigger a full, non-resumable re-embed inside a search that an
-agent may be running under a tool timeout.
+### Skips an unbuilt search index
 
-### Reindex compresses neighbour vectors
+Opening a query-only session before an index exists returns no matches without loading an embedder, while still closing the database cleanly.
 
-`lat reindex` on that uncompressed index rebuilds it with 1-bit neighbour vectors and a 1600-candidate
-search beam: node blocks shrink by more than 10x and the same query returns the same sections.
+### Patches generated WASM loading explicitly
 
-The beam is asserted from libSQL's stored index settings, not the DDL text. Without it, float1bit lost
-true top-5 hits on 8% of real queries against a 16k-section corpus — a loss this 9-section fixture,
-where every search is exact, cannot show.
+The package build replaces wasm-bindgen's opaque filesystem loader with an explicit byte initializer that is idempotent and discoverable by deployment tracers.
+
+### Rejects unknown generated WASM glue
+
+The package build fails clearly when generated wasm-bindgen output no longer contains the loader shape Lat knows how to replace.
+
+## Hybrid Retrieval
+
+Tests in [[tests/hybrid-search.test.ts]] verify passage ownership, token safety, hybrid evidence, and transactional cache publication.
+
+### Preserves complete passage coverage
+
+Oversized prose, nested lists, code lines, table cells, and Unicode retain source coverage and fit the embedding model input budget without duplicating descendant content.
+
+### Rejects local embedding truncation
+
+The real local tokenizer counts the full input and the WASM embedder rejects text beyond its limit, including tokenizer configurations containing an embedded truncation setting.
+
+### Retrieves lexical evidence independently
+
+Exact identifiers remain discoverable below the semantic minimum, with evidence linked to source spans in the owning section.
+
+### Collapses before rank fusion
+
+Repeated passage owners collapse before ranks are assigned, and equal channel scores share a section rank.
+
+### Reuses vectors after source movement
+
+Adding blank lines changes source locations without re-embedding unchanged contextual inputs.
+
+### Keeps incremental FTS scores equal to fresh indexes
+
+Section replacements, deletions, and deleting all sections produce the same lexical scores and hybrid ranks as fresh indexing, while line-only edits reuse every embedding.
+
+### Repairs historical FTS statistics once without embedding
+
+An unchanged project repairs old lexical statistics without embedding calls. Failed maintenance rolls back scores and version metadata; subsequent no-op indexing does not rebuild FTS.
+
+### Rolls back failed FTS rebuilds
+
+A failed FTS rebuild restores the prior sections and searchable scores, and a subsequent successful indexing attempt applies the edit.
+
+### Publishes only successful generations
+
+A failed replacement leaves the existing manifest and complete searchable generation intact.
+
+### Preserves FTS rollback and portable copies
+
+Rolled-back writes do not leak into FTS; a checkpointed database retains scored search when copied and reopened.
+
+### Switches preview without changing relevance
+
+Passage, introduction, and combined previews use the same ranked match while changing only its presentation.
+
+### Archives legacy caches without overwriting backups
+
+Migration reads the old model and archives the libSQL file with a collision-safe .old-12 suffix before publishing the new index.
+
+Legacy inspection and fixture creation finish in separate processes before archival, releasing native file handles on Windows.
+
+### Serializes concurrent index writers
+
+Concurrent writers cannot interleave publication, and an existing reader remains usable after another generation is published.
+
+### Rejects invalid vectors before changing the index
+
+Missing or malformed embedding output fails before indexed data is modified, preserving previous retrieval evidence.
+
+### Validates hosted input and response ordering
+
+The hosted tokenizer rejects oversized input before network access, and response vectors are reordered to match input indices.
+
+### Overfetches toward unique sections
+
+Repeated passages from one owner trigger deeper candidate retrieval, while the hard passage budget reports exhaustion instead of pretending section recall is complete.
+
+### Keeps readers alive across process boundaries
+
+A child process can open a published FTS generation while the parent publishes its replacement, and the child retains its original evidence until it closes.
+
+Windows published-generation readers use private copies so FTS can write without locking the published file. Publication never acquires a write lock on the active generation.
+
+### Stems English lexical fields and queries
+
+English inflections match across indexed fields and queries while original evidence, Unicode tokens, and exact identifier lookup remain intact. Updating a passage removes its old lexical terms.
+
+### Upgrades lexical indexes without embedding again
+
+An index with unstemmed FTS migrates to normalized lexical fields without regenerating vectors or changing source passages.
+
+### Packages stemmer runtime assets
+
+Server dependency tracing includes both the stemmer JavaScript glue and WASM binary so deployed search can initialize outside the workspace.
