@@ -71,3 +71,16 @@ search: the mismatched table is dropped and rebuilt at 384 dims and the query su
 
 This is the pre-versioning `.cache` upgrade path — before, the stale table was queried and threw a
 raw dimension-mismatch error.
+
+### Search keeps an uncompressed index as built
+
+An index created without neighbour compression keeps answering `runSearch` correctly, and its
+on-disk node blocks are left exactly as built — search never rebuilds or converts it.
+
+Upgrading the CLI alone must not trigger a full, non-resumable re-embed inside a search that an
+agent may be running under a tool timeout.
+
+### Reindex compresses neighbour vectors
+
+`lat reindex` on that uncompressed index rebuilds it with 1-bit neighbour vectors: each node
+block shrinks by more than 10x, and the same query returns the same sections in the same order.

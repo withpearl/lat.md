@@ -9,11 +9,15 @@ import {
   openDb,
   ensureMeta,
   ensureSectionsSchema,
+  setStoredModel,
   closeDb,
 } from '../src/search/db.js';
+import { modelKey } from '../src/search/embedder.js';
 import { indexSections } from '../src/search/index.js';
 import { searchSections } from '../src/search/search.js';
 import { runSearch } from '../src/cli/search.js';
+import { reindexCommand } from '../src/cli/reindex.js';
+import { plainStyler } from '../src/context.js';
 import { loadAllSections } from '../src/lattice.js';
 import { startReplayServer, hasReplayData } from './rag-replay-server.js';
 import type { Client } from '@libsql/client';
@@ -144,6 +148,33 @@ describe('search (rag, local)', () => {
   });
 });
 
+/**
+ * Clear every embedding-key source and point the config dir at a temp dir, so a
+ * test resolves to the local model and never reads or writes the user's config.
+ * Returns a function that restores the previous environment.
+ */
+function isolateLatEnv(): () => void {
+  const keys = [
+    'LAT_LLM_KEY',
+    'LAT_LLM_KEY_FILE',
+    'LAT_LLM_KEY_HELPER',
+    'XDG_CONFIG_HOME',
+  ] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  const cfg = mkdtempSync(join(tmpdir(), 'lat-cfg-'));
+  process.env.LAT_LLM_KEY = '';
+  process.env.LAT_LLM_KEY_FILE = '';
+  process.env.LAT_LLM_KEY_HELPER = '';
+  process.env.XDG_CONFIG_HOME = cfg;
+  return () => {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    rmDirBestEffort(cfg);
+  };
+}
+
 // --- Legacy cache upgrade: rebuild a pre-versioning index ---
 //
 // A `.cache` built by a version that never recorded `meta.embedding_model` has
@@ -170,18 +201,7 @@ describe('search (rag, legacy cache upgrade)', () => {
 
     // Clear the env so the rebuild resolves to the local 384-dim model — the
     // dimension mismatch that previously threw a raw libsql error at query time.
-    const savedKeys = [
-      'LAT_LLM_KEY',
-      'LAT_LLM_KEY_FILE',
-      'LAT_LLM_KEY_HELPER',
-      'XDG_CONFIG_HOME',
-    ] as const;
-    const saved = Object.fromEntries(savedKeys.map((k) => [k, process.env[k]]));
-    const cfg = mkdtempSync(join(tmpdir(), 'lat-cfg-'));
-    process.env.LAT_LLM_KEY = '';
-    process.env.LAT_LLM_KEY_FILE = '';
-    process.env.LAT_LLM_KEY_HELPER = '';
-    process.env.XDG_CONFIG_HOME = cfg;
+    const restoreEnv = isolateLatEnv();
 
     try {
       const result = await runSearch(
@@ -192,13 +212,99 @@ describe('search (rag, legacy cache upgrade)', () => {
       expect(result.matches.length).toBeGreaterThan(0);
       expect(result.matches[0].section.id).toContain('Authentication');
     } finally {
-      for (const k of savedKeys) {
-        if (saved[k] === undefined) delete process.env[k];
-        else process.env[k] = saved[k];
-      }
-      rmDirBestEffort(cfg);
+      restoreEnv();
       rmDirBestEffort(join(latDir, '..'));
     }
+  });
+});
+
+// --- Vector index layout: compressed neighbour vectors ---
+//
+// DiskANN stores, per node, a copy of every neighbour's vector. At full float32
+// precision those copies made a 7 MB corpus build a 1.3 GB index, so they are
+// stored at one bit per dimension. `CREATE INDEX IF NOT EXISTS` never touches
+// an existing index: a cache built before the change keeps working unchanged,
+// and `lat reindex` is what rebuilds it compressed.
+
+/** The index as every version before neighbour compression created it. */
+async function createUncompressedIndex(db: Client, dimensions: number) {
+  await ensureSectionsSchema(db, dimensions);
+  await db.execute('DROP INDEX sections_vec_idx');
+  await db.execute(
+    'CREATE INDEX sections_vec_idx ON sections (libsql_vector_idx(embedding))',
+  );
+}
+
+/** Bytes libSQL stores per graph node of `sections_vec_idx` (one row each). */
+async function vectorIndexBlockBytes(latDir: string): Promise<number> {
+  const db = openDb(latDir);
+  try {
+    const rows = await db.execute(
+      'SELECT DISTINCT length(data) AS n FROM sections_vec_idx_shadow',
+    );
+    expect(rows.rows).toHaveLength(1);
+    return Number(rows.rows[0].n);
+  } finally {
+    await closeDb(db);
+  }
+}
+
+describe('search (rag, vector index layout)', () => {
+  const query = 'how do we handle user login and security?';
+  let latDir: string;
+  let restoreEnv: () => void;
+  let uncompressedBytes: number;
+  let uncompressedHits: string[];
+
+  beforeAll(async () => {
+    restoreEnv = isolateLatEnv();
+    latDir = copyFixture();
+    const embedder = await createEmbedder({ model: minilm });
+    const db = openDb(latDir);
+    try {
+      await ensureMeta(db);
+      await createUncompressedIndex(db, embedder.dimensions);
+      await indexSections(latDir, db, embedder);
+      await setStoredModel(db, modelKey(embedder));
+    } finally {
+      await closeDb(db);
+    }
+    uncompressedBytes = await vectorIndexBlockBytes(latDir);
+  });
+
+  afterAll(() => {
+    restoreEnv?.();
+    if (latDir) rmDirBestEffort(join(latDir, '..'));
+  });
+
+  // @lat: [[search#RAG Tests#Search keeps an uncompressed index as built]]
+  it('keeps serving an index built before compression, unchanged', async () => {
+    const result = await runSearch(latDir, query, 5);
+    expect(result.matches[0].section.id).toContain('Authentication');
+    uncompressedHits = result.matches.map((m) => m.section.id);
+
+    expect(await vectorIndexBlockBytes(latDir)).toBe(uncompressedBytes);
+  });
+
+  // @lat: [[search#RAG Tests#Reindex compresses neighbour vectors]]
+  it('rebuilds it with compressed neighbour vectors on reindex', async () => {
+    const reindexed = await reindexCommand(
+      {
+        latDir,
+        projectRoot: join(latDir, '..'),
+        styler: plainStyler,
+        mode: 'cli',
+      },
+      { local: true },
+    );
+    expect(reindexed.isError, reindexed.output).toBeFalsy();
+
+    // float32 → 1-bit neighbours: 384-dim nodes drop from ~80 KB to ~5 KB.
+    expect(await vectorIndexBlockBytes(latDir)).toBeLessThan(
+      uncompressedBytes / 10,
+    );
+    const result = await runSearch(latDir, query, 5);
+    expect(result.matches.map((m) => m.section.id)).toEqual(uncompressedHits);
   });
 });
 

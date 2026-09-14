@@ -388,6 +388,8 @@ Uses `@libsql/client` in local file mode. Under Node, file URLs load the native 
 
 Vector search is built into libsql via `F32_BLOB` column type, `libsql_vector_idx` for indexing, and `vector_top_k()` for KNN queries. Returned candidates retain their exact cosine similarity as a score for downstream consumers.
 
+The DiskANN index is created with `compress_neighbors=float1bit` ([[src/search/db.ts#ensureSectionsSchema]]). Each graph node stores a copy of every neighbour's vector; at float32 those copies were ~94% of the file (a 7 MB corpus built a 1.3 GB index), at one bit per dimension each node block is ~15x smaller. Compression only steers traversal — every visited candidate is ranked by its full-precision vector — and libSQL's default degree rises (51 → 60 neighbours at 384 dims) because edges got cheaper. An existing index is never converted in place (`CREATE INDEX IF NOT EXISTS`); it keeps its layout until [[cli#reindex]] recreates it.
+
 Single `sections` table holds metadata, content, content hash, and the embedding vector. No separate vector table needed. The `meta` table records the embedding model + dimensions the index was built with ([[src/search/db.ts#getStoredModel]], e.g. `local:minilm-l6-v2:384` or `openai:1536`). This record is authoritative for [[cli#search#Backend selection]] — vectors from different models are not comparable, so a model change never silently rebuilds; [[cli#reindex]] drops (via [[src/search/db.ts#dropSections]]) and rebuilds explicitly.
 
 The database is stored at `lat.md/.cache/vectors.db` and should not be committed (included in `.gitignore` template).

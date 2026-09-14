@@ -42,7 +42,15 @@ export async function setStoredModel(db: Client, value: string): Promise<void> {
   });
 }
 
-/** Create the `sections` table (fixed-width vector column) + index if absent. */
+/**
+ * Create the `sections` table (fixed-width vector column) + index if absent.
+ *
+ * The DiskANN index stores each node's neighbour vectors at one bit per
+ * dimension. Uncompressed they were ~94% of the file (a 7 MB corpus built a
+ * 1.3 GB index); search still ranks every visited candidate by its
+ * full-precision vector, so the compression only steers graph traversal. An
+ * index built without it keeps its layout until `lat reindex` recreates it.
+ */
 export async function ensureSectionsSchema(
   db: Client,
   dimensions: number,
@@ -60,7 +68,7 @@ export async function ensureSectionsSchema(
   );
   await db.execute(
     `CREATE INDEX IF NOT EXISTS sections_vec_idx
-     ON sections (libsql_vector_idx(embedding))`,
+     ON sections (libsql_vector_idx(embedding, 'compress_neighbors=float1bit'))`,
   );
 }
 
