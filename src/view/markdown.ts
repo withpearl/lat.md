@@ -390,9 +390,13 @@ function codeLanguage(target: string): {
   switch (extname(target.split('#', 1)[0]).toLowerCase()) {
     case '.ts':
     case '.tsx':
+    case '.mts':
+    case '.cts':
       return { className: 'code-language-ts', label: 'TS' };
     case '.js':
     case '.jsx':
+    case '.mjs':
+    case '.cjs':
       return { className: 'code-language-js', label: 'JS' };
     case '.py':
       return { className: 'code-language-py', label: 'PY' };

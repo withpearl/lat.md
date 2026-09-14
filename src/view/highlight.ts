@@ -74,12 +74,16 @@ const languageAliases: Record<string, string> = {
 
 const languageByExtension: Record<string, string> = {
   '.c': 'c',
+  '.cjs': 'javascript',
+  '.cts': 'typescript',
   '.dart': 'dart',
   '.go': 'go',
   '.h': 'c',
   '.java': 'java',
   '.js': 'javascript',
   '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.mts': 'typescript',
   '.py': 'python',
   '.rs': 'rust',
   '.ts': 'typescript',

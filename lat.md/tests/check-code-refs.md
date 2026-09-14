@@ -21,6 +21,12 @@ Given a `lat.md` file with [[markdown#Frontmatter#require-code-mention]] and a l
 
 Git projects inspect tracked regular files; non-Git projects walk visible, non-ignored files.
 
+## Scans JavaScript and TypeScript module files
+
+`@lat:` references in `.mjs`, `.cjs`, `.mts` and `.cts` files count, with ripgrep and with the TypeScript fallback. Test and config files often use these extensions.
+
+When scanning was first limited to supported extensions, these were left out, and every test spec referenced only from such a file was reported as having no code mention.
+
 ## Scans Dart references around annotations
 
 Dart `// @lat:` references retain their authored line numbers before ordinary declarations and between metadata annotations and declarations, and dangling targets remain normal code-reference errors.

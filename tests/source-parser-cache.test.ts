@@ -18,6 +18,11 @@ import {
 
 const SOURCE_CACHE_FIXTURES = {
   '.c': { content: 'int cached(void) { return 1; }\n', symbol: 'cached' },
+  '.cjs': { content: 'function cached() {}\n', symbol: 'cached' },
+  '.cts': {
+    content: 'export function cached(): void {}\n',
+    symbol: 'cached',
+  },
   '.dart': { content: 'int cached() => 1;\n', symbol: 'cached' },
   '.go': { content: 'package cache\nfunc Cached() {}\n', symbol: 'Cached' },
   '.h': { content: 'int cached(void);\n', symbol: 'cached' },
@@ -25,6 +30,11 @@ const SOURCE_CACHE_FIXTURES = {
   '.js': { content: 'export function cached() {}\n', symbol: 'cached' },
   '.jsx': {
     content: 'export function cached() { return <div /> }\n',
+    symbol: 'cached',
+  },
+  '.mjs': { content: 'export function cached() {}\n', symbol: 'cached' },
+  '.mts': {
+    content: 'export function cached(): void {}\n',
     symbol: 'cached',
   },
   '.php': { content: '<?php function cached() {}\n', symbol: 'cached' },

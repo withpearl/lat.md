@@ -233,6 +233,35 @@ describe('supported source code-reference scanning', () => {
     }
   });
 
+  // @lat: [[check-code-refs#Scans JavaScript and TypeScript module files]]
+  it('finds references in .mjs, .cjs, .mts and .cts files with ripgrep and TypeScript', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lat-module-code-refs-'));
+    roots.push(root);
+    const modules = ['.mjs', '.cjs', '.mts', '.cts'];
+    await Promise.all(
+      modules.map((extension) =>
+        writeFile(
+          join(root, `config.test${extension}`),
+          codeReference('//', `Specs#${extension.slice(1)}`),
+        ),
+      ),
+    );
+    const original = process.env._LAT_DISABLE_RG;
+    try {
+      for (const disableRg of [undefined, '1']) {
+        if (disableRg) process.env._LAT_DISABLE_RG = disableRg;
+        else delete process.env._LAT_DISABLE_RG;
+        const scan = await scanCodeRefs(root);
+        expect(scan.refs.map((ref) => ref.target).sort()).toEqual(
+          modules.map((extension) => `Specs#${extension.slice(1)}`).sort(),
+        );
+      }
+    } finally {
+      if (original === undefined) delete process.env._LAT_DISABLE_RG;
+      else process.env._LAT_DISABLE_RG = original;
+    }
+  });
+
   it('scans PHP line comments without matching attributes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lat-php-code-refs-'));
     roots.push(root);

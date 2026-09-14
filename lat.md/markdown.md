@@ -74,6 +74,8 @@ Those enrichments depend on live GitHub repository, account, permission, or issu
 
 Obsidian-style links: `[[target]]` or `[[target|alias]]`. Uses `|` as the alias divider.
 
+Link text may contain balanced brackets, so a path with a route segment such as `[[web/app/c/[companySlug]/page.tsx]]` is one link. A `]` that closes a bracket opened inside the link is text, not the end of the link.
+
 Targets are section ids — hierarchical paths like `lat.md/dev-process#Testing#Running Tests`. The vault root is the project directory (the parent of `lat.md/`), so all markdown section ids include the `lat.md/` prefix. Wiki links can also reference [[markdown#Wiki Links#Repository Path Links|repository paths]] and [[markdown#Wiki Links#Source Code Links|source symbols]].
 
 Validated by [[cli#check#md]].
@@ -132,7 +134,7 @@ Wiki links can reference symbols in TypeScript, JavaScript, Python, Dart, Java, 
 - **`[[src/app.h#Greeter#prefix]]`** — the `prefix` field of struct `Greeter` in C
 - **`[[src/config.ts]]`** — link to the file itself (no symbol)
 
-Supported extensions: `.c`, `.dart`, `.go`, `.h`, `.java`, `.js`, `.jsx`, `.py`, `.rs`, `.ts`, `.tsx`. The typed [[src/source-formats.ts#SOURCE_FILE_EXTENSIONS]] registry governs source-link parsing, external source validation, and `@lat:` code-mention scanning.
+Supported extensions: `.c`, `.cjs`, `.cts`, `.dart`, `.go`, `.h`, `.java`, `.js`, `.jsx`, `.mjs`, `.mts`, `.php`, `.py`, `.rs`, `.ts`, `.tsx`. The typed [[src/source-formats.ts#SOURCE_FILE_EXTENSIONS]] registry governs source-link parsing, external source validation, and `@lat:` code-mention scanning.
 
 Python symbols: functions, classes, methods, module-level variables. Decorated definitions (`@decorator`) are unwrapped transparently — `[[file.py#my_func]]` resolves whether or not `my_func` has decorators, and `# @lat:` comments placed between decorators and the `def`/`class` line are scanned normally.
 

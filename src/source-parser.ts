@@ -96,12 +96,16 @@ async function ensureParser(): Promise<Parser> {
 /** Every supported source extension must declare a tree-sitter grammar. */
 const grammarMap = {
   '.c': 'tree-sitter-c.wasm',
+  '.cjs': 'tree-sitter-javascript.wasm',
+  '.cts': 'tree-sitter-typescript.wasm',
   '.dart': 'tree-sitter-dart.wasm',
   '.go': 'tree-sitter-go.wasm',
   '.h': 'tree-sitter-c.wasm',
   '.java': 'tree-sitter-java.wasm',
   '.js': 'tree-sitter-javascript.wasm',
   '.jsx': 'tree-sitter-javascript.wasm',
+  '.mjs': 'tree-sitter-javascript.wasm',
+  '.mts': 'tree-sitter-typescript.wasm',
   '.php': 'tree-sitter-php.wasm',
   '.py': 'tree-sitter-python.wasm',
   '.rs': 'tree-sitter-rust.wasm',
@@ -1447,12 +1451,16 @@ function firstLine(text: string): string {
 /** Every supported source extension must declare a symbol extractor. */
 const symbolExtractors = {
   '.c': extractCSymbols,
+  '.cjs': extractTsSymbols,
+  '.cts': extractTsSymbols,
   '.dart': extractDartSymbols,
   '.go': extractGoSymbols,
   '.h': extractCSymbols,
   '.java': extractJavaSymbols,
   '.js': extractTsSymbols,
   '.jsx': extractTsSymbols,
+  '.mjs': extractTsSymbols,
+  '.mts': extractTsSymbols,
   '.php': extractPhpSymbols,
   '.py': extractPySymbols,
   '.rs': extractRustSymbols,

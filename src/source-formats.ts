@@ -3,12 +3,16 @@ import { extname } from 'node:path';
 /** Source file extensions supported by Lat's parser and code-reference scan. */
 export const SOURCE_FILE_EXTENSIONS = [
   '.c',
+  '.cjs',
+  '.cts',
   '.dart',
   '.go',
   '.h',
   '.java',
   '.js',
   '.jsx',
+  '.mjs',
+  '.mts',
   '.php',
   '.py',
   '.rs',
