@@ -133,6 +133,31 @@ async function removeOldGenerations(
   }
 }
 
+/**
+ * Write a compacted copy of a finished staging database beside it and return
+ * the copy's generation name, or null if compaction failed. The engine does not
+ * reuse pages freed by updates, and every FTS rebuild frees the whole old index,
+ * so without this each incremental publish carries all earlier dead space
+ * forward. The driver accepts only a literal path and cannot write under a
+ * directory whose name contains an apostrophe; on any failure the caller
+ * publishes the uncompacted staging file, since compaction only saves space.
+ */
+async function compactGeneration(
+  db: SearchDb,
+  dir: string,
+): Promise<string | null> {
+  const name = `search-${randomUUID()}.db`,
+    path = join(dir, name);
+  try {
+    await db.execute(`VACUUM INTO '${path.replaceAll("'", "''")}'`);
+    return name;
+  } catch {
+    for (const suffix of ['', '-wal', '-shm'])
+      await rm(path + suffix, { force: true });
+    return null;
+  }
+}
+
 /** Stage a complete generation; failed work cannot replace a usable index. */
 export async function writeIndex<T>(
   latDir: string,
@@ -146,6 +171,7 @@ export async function writeIndex<T>(
   const name = `search-${randomUUID()}.db`,
     path = join(dir, name);
   let db: SearchDb | undefined;
+  let compacted: string | null = null;
   try {
     let manifest;
     try {
@@ -181,25 +207,28 @@ export async function writeIndex<T>(
       (await db.execute('SELECT total_changes() AS n')).rows[0].n ===
         changesBefore;
     await db.checkpoint();
+    if (!unchanged) compacted = await compactGeneration(db, dir);
     await db.close();
     db = undefined;
-    if (unchanged) {
+    if (unchanged || compacted)
       for (const suffix of ['', '-wal', '-shm'])
         await rm(path + suffix, { force: true });
-      return result;
-    }
+    if (unchanged) return result;
+    const published = compacted ?? name;
     const temp = join(dir, `${MANIFEST_FILE}.${randomUUID()}.tmp`);
     await writeFile(
       temp,
-      JSON.stringify({ version: INDEX_VERSION, file: name }),
+      JSON.stringify({ version: INDEX_VERSION, file: published }),
     );
     await rename(temp, join(dir, MANIFEST_FILE));
-    await removeOldGenerations(dir, [name, manifest?.file]);
+    await removeOldGenerations(dir, [published, manifest?.file]);
     return result;
   } catch (error) {
     await db?.close();
-    for (const suffix of ['', '-wal', '-shm'])
-      await rm(path + suffix, { force: true });
+    for (const staged of [path, compacted && join(dir, compacted)])
+      if (staged)
+        for (const suffix of ['', '-wal', '-shm'])
+          await rm(staged + suffix, { force: true });
     throw error;
   } finally {
     await release();

@@ -190,6 +190,18 @@ Publishing a generation deletes every older generation file, including a crashed
 
 Every published update copies the whole database, so generations used to accumulate: one full-size copy per doc edit followed by a search.
 
+### Publishes compacted generations
+
+Five publishes that each rewrite every passage keep the published file within four pages of the first one's size, and that file searches when copied alone.
+
+The engine does not reuse pages an update frees, and replacing passages rebuilds FTS, so a generation copied forward without compaction keeps every earlier round's dead space. One shared index grew from 107 MB to 144 MB over four publishes while its rows grew 1%.
+
+### Publishes uncompacted when compaction fails
+
+When compaction throws, the staged generation is published instead, no partial compacted file is left beside it, and it stays searchable.
+
+Compaction only saves space, so it must never cost a usable index. The database driver cannot compact into a directory whose path contains an apostrophe.
+
 ### Preserves FTS rollback and portable copies
 
 Rolled-back writes do not leak into FTS; a checkpointed database retains scored search when copied and reopened.

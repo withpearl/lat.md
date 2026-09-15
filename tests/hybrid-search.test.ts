@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   existsSync,
+  statSync,
 } from 'node:fs';
 import { cp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -715,6 +716,76 @@ describe('hybrid search', () => {
       } finally {
         await db.close();
       }
+    }
+  });
+  // @lat: [[tests/search#Hybrid Retrieval#Publishes compacted generations]]
+  it('publishes generations that do not grow when every passage is rewritten', async () => {
+    const page = (round: number) =>
+      Array.from(
+        { length: 120 },
+        (_, i) =>
+          `# Section ${i}\n\nneedle round ${round} ${'filler text '.repeat(40)}`,
+      ).join('\n\n');
+    const f = fixture(page(0));
+    const cache = join(f.lat, '.cache');
+    const build = async (db: SearchDb) => {
+      await ensureSectionsSchema(db, 2);
+      await indexSections(f.lat, db, simple);
+      await setStoredModel(db, 'local:test:2');
+    };
+    const sizes: number[] = [];
+    for (const round of [0, 1, 2, 3, 4]) {
+      writeFileSync(join(f.lat, 'guide.md'), page(round));
+      await writeIndex(f.lat, undefined, false, build);
+      sizes.push(statSync(join(cache, readManifest(cache)!.file)).size);
+    }
+    // Each round replaces every passage and so rebuilds FTS. A generation copied
+    // forward without compaction keeps the space earlier rounds freed: here it
+    // grows by about ten 4 KB pages a round, where compacted files stay within two.
+    expect(Math.max(...sizes) - sizes[0]).toBeLessThanOrEqual(4 * 4096);
+    // The compacted file is complete without sidecars: copied alone, it searches.
+    const copy = join(f.root, 'copy.db');
+    await cp(join(cache, readManifest(cache)!.file), copy);
+    const db = new SearchDb(copy);
+    try {
+      const hits = await searchSections(db, 'needle round 4', simple);
+      expect(hits[0].evidence[0].text).toContain('needle round 4');
+    } finally {
+      await db.close();
+    }
+  });
+  // @lat: [[tests/search#Hybrid Retrieval#Publishes uncompacted when compaction fails]]
+  it('publishes the staged generation when compaction fails', async () => {
+    const f = fixture('# Guide\n\nneedle text');
+    const cache = join(f.lat, '.cache');
+    const execute = SearchDb.prototype.execute;
+    const spy = vi
+      .spyOn(SearchDb.prototype, 'execute')
+      .mockImplementation(async function (this: SearchDb, s) {
+        if ((typeof s === 'string' ? s : s.sql).startsWith('VACUUM INTO'))
+          throw new Error('simulated compaction failure');
+        return execute.call(this, s);
+      });
+    await writeIndex(f.lat, undefined, false, async (db) => {
+      await ensureSectionsSchema(db, 2);
+      await indexSections(f.lat, db, simple);
+      await setStoredModel(db, 'local:test:2');
+    });
+    expect(
+      spy.mock.calls.some(([s]) =>
+        (typeof s === 'string' ? s : s.sql).startsWith('VACUUM INTO'),
+      ),
+    ).toBe(true);
+    spy.mockRestore();
+    const published = readManifest(cache)!.file;
+    expect(
+      readdirSync(cache).filter((entry) => /^search-[\w-]+\.db$/.test(entry)),
+    ).toEqual([published]);
+    const db = new SearchDb(join(cache, published));
+    try {
+      expect((await searchSections(db, 'needle', simple)).length).toBe(1);
+    } finally {
+      await db.close();
     }
   });
   // @lat: [[tests/search#Hybrid Retrieval#Preserves FTS rollback and portable copies]]
