@@ -361,10 +361,13 @@ describe('supported source code-reference scanning', () => {
     }
   });
 
-  // @lat: [[tests/ts-fallback#Git repositories scan tracked sources]]
-  it('uses the same tracked source scope with ripgrep and TypeScript', async () => {
+  // @lat: [[tests/ts-fallback#Git repositories scan tracked and unignored sources]]
+  it('uses the same Git source scope with ripgrep and TypeScript', async () => {
     const root = await createDiscoveryParityProject();
     execFileSync('git', ['init', '--quiet'], { cwd: root });
+    // Git matches ignore rules case-sensitively on Linux by default; pin it so
+    // `CaseIgnored/` keeps ignoring `caseignored/` on every platform.
+    execFileSync('git', ['config', 'core.ignorecase', 'true'], { cwd: root });
     execFileSync(
       'git',
       [
@@ -379,6 +382,8 @@ describe('supported source code-reference scanning', () => {
       ],
       { cwd: root },
     );
+    // A tracked file counts even when an ignore rule matches it.
+    execFileSync('git', ['add', '--force', 'ignored/ignored.ts'], { cwd: root });
     const symlinkBlob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
       cwd: root,
       encoding: 'utf8',
@@ -403,8 +408,16 @@ describe('supported source code-reference scanning', () => {
         fallbackDiscovery.scan(),
         fallbackDiscovery.listSourceFiles(),
       ]);
+      // Untracked files count unless Git ignores them, so a test not yet
+      // staged covers its specs; dependency trees, dot-directories and the
+      // nested Lat project stay out whether tracked or not.
       expect(relativeFiles(root, fallbackFiles)).toEqual([
+        'generated/visible.ts',
+        'ignored/ignored.ts',
+        'nested/kept.skip.ts',
         'nested/visible.ts',
+        'pruned/reincluded/kept.ts',
+        'src/kept.tmp.ts',
         'src/visible.ts',
       ]);
 

@@ -157,18 +157,27 @@ function hasDotDirectory(path: string): boolean {
   return parts.slice(0, -1).some((part) => part.startsWith('.'));
 }
 
-/** List readable regular source files tracked by the enclosing Git repository. */
-async function findGitTrackedSourceFiles(
+/**
+ * List readable regular source files in the enclosing Git repository: every
+ * tracked file, plus untracked files Git does not ignore. Untracked files count
+ * so a test written moments ago covers its specs before anyone stages it —
+ * otherwise `lat check` reports those specs as uncovered in the middle of the
+ * work that covers them. Ignored build output still stays out.
+ */
+async function findGitSourceFiles(
   projectRoot: string,
 ): Promise<string[] | null> {
-  const out = await tryExec(
-    'git',
-    ['ls-files', '--stage', '-z', '--', '.'],
-    projectRoot,
-  );
-  if (out === null) return null;
+  const [tracked, untracked] = await Promise.all([
+    tryExec('git', ['ls-files', '--stage', '-z', '--', '.'], projectRoot),
+    tryExec(
+      'git',
+      ['ls-files', '--others', '--exclude-standard', '-z', '--', '.'],
+      projectRoot,
+    ),
+  ]);
+  if (tracked === null || untracked === null) return null;
 
-  const entries = out
+  const trackedPaths = tracked
     .split('\0')
     .filter(Boolean)
     .flatMap((entry) => {
@@ -178,6 +187,22 @@ async function findGitTrackedSourceFiles(
       if (mode !== '100644' && mode !== '100755') return [];
       return [toPosix(entry.slice(tab + 1))];
     });
+  // Git lists an unignored dependency tree like any other untracked files;
+  // lat never scans one, as in a repository without Git.
+  const untrackedPaths = untracked
+    .split('\0')
+    .filter(Boolean)
+    .map(toPosix)
+    .filter(
+      (path) =>
+        !path
+          .split('/')
+          .slice(0, -1)
+          .some((part) =>
+            (ALWAYS_IGNORED_DIRECTORIES as readonly string[]).includes(part),
+          ),
+    );
+  const entries = [...trackedPaths, ...untrackedPaths];
   const subProjects = nestedLatProjects(entries);
   const candidates = entries.filter(
     (path) =>
@@ -475,24 +500,24 @@ export function createCodeReferenceDiscovery(
   profile?: Pick<Profiler, 'time'>,
 ): CodeReferenceDiscovery {
   let excludesPromise: Promise<string[]> | undefined;
-  let trackedFilesPromise: Promise<string[] | null> | undefined;
+  let gitFilesPromise: Promise<string[] | null> | undefined;
   let sourceFilesPromise: Promise<string[]> | undefined;
   let scanPromise: Promise<ScanResult> | undefined;
 
   const ripgrepExcludes = () =>
     (excludesPromise ??= discoverRipgrepExcludes(projectRoot, profile));
 
-  const trackedFiles = () =>
-    (trackedFilesPromise ??= profileScan(
+  const gitFiles = () =>
+    (gitFilesPromise ??= profileScan(
       profile,
-      'list tracked source files with git',
-      () => findGitTrackedSourceFiles(projectRoot),
+      'list tracked and untracked source files with git',
+      () => findGitSourceFiles(projectRoot),
     ));
 
   const listSourceFiles = () =>
     (sourceFilesPromise ??= (async () => {
-      const tracked = await trackedFiles();
-      if (tracked !== null) return tracked;
+      const inGit = await gitFiles();
+      if (inGit !== null) return inGit;
 
       if (process.env._LAT_DISABLE_RG !== '1') {
         const files = await tryRipgrepSourceFiles(
@@ -510,13 +535,13 @@ export function createCodeReferenceDiscovery(
 
   const scan = () =>
     (scanPromise ??= (async () => {
-      const tracked = await trackedFiles();
+      const inGit = await gitFiles();
       if (process.env._LAT_DISABLE_RG !== '1') {
         const refs = await tryRipgrepCodeRefs(
           projectRoot,
-          tracked === null ? await ripgrepExcludes() : [],
+          inGit === null ? await ripgrepExcludes() : [],
           profile,
-          tracked ?? undefined,
+          inGit ?? undefined,
         );
         if (refs !== null) return { refs };
       }

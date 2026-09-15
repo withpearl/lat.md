@@ -19,7 +19,7 @@ Given a `lat.md` file with [[markdown#Frontmatter#require-code-mention]] and a l
 
 `scanCodeRefs` and the separate `discoverSourceFiles` API share the central source-extension registry across ripgrep and TypeScript fallbacks. Unsupported files are neither searched nor included in the UI's source watch scope.
 
-Git projects inspect tracked regular files; non-Git projects walk visible, non-ignored files.
+Git projects inspect tracked regular files plus untracked files Git does not ignore; non-Git projects walk visible, non-ignored files.
 
 ## Scans JavaScript and TypeScript module files
 

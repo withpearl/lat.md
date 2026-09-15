@@ -86,7 +86,7 @@ Relative Markdown links are resolved against their source document before applyi
 
 Builds reject any existing destination, including an empty directory or prior export. `--force` allows intentional replacement; the builder stages the complete artifact beside the destination and moves it only after generation succeeds, retrying transient filesystem locks.
 
-Build artifacts carry no ownership marker. Git projects naturally exclude untracked output from their tracked source scope, while destinations that could contain the project root remain forbidden even with `--force`.
+Build artifacts carry no ownership marker. Git projects exclude ignored output from their source scope, so an export directory inside the project should be gitignored; destinations that could contain the project root remain forbidden even with `--force`.
 
 ### Server export
 

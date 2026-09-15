@@ -35,6 +35,8 @@ With more source files than the machine-derived fallback concurrency slots, the 
 
 The source-discovery and code-reference APIs return matching ordered files and references through TypeScript and ripgrep across nested ignores, negations, dot paths, symlinks, dependency trees, nested Lat projects, and non-Git directories.
 
-## Git repositories scan tracked sources
+## Git repositories scan tracked and unignored sources
 
-Both scanners consume the same Git-tracked regular-file list while excluding symlinks, files beneath dot-directories, untracked files, and complete nested Lat projects.
+Both scanners consume the same list: tracked regular files plus untracked files Git does not ignore, excluding symlinks, dot-directories, dependency trees and nested Lat projects.
+
+Untracked files count so a test written moments ago covers its specs before anyone stages it. A tracked file counts even when an ignore rule matches it, because Git ignores only untracked files.
